@@ -149,6 +149,7 @@ def cmd_chat(args):
         "provider": getattr(args, "provider", None),
         "toolsets": args.toolsets,
         "verbose": args.verbose,
+        "skin": getattr(args, "skin", None),
         "query": args.query,
         "resume": getattr(args, "resume", None),
     }
@@ -843,6 +844,11 @@ For more help on a command:
         "-v", "--verbose",
         action="store_true",
         help="Verbose output"
+    )
+    chat_parser.add_argument(
+        "--skin",
+        choices=["hermes", "ares"],
+        help="Visual skin to use for the CLI"
     )
     chat_parser.add_argument(
         "--resume", "-r",

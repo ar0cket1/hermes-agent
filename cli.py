@@ -17,6 +17,8 @@ import os
 import sys
 import json
 import atexit
+import random
+import time
 import uuid
 from pathlib import Path
 from datetime import datetime
@@ -192,6 +194,10 @@ def load_cli_config() -> Dict[str, Any]:
         "toolsets": ["all"],
         "display": {
             "compact": False,
+            "skin": "hermes",
+            "animate_banner": False,
+            "ambient_motion": True,
+            "easter_eggs": True,
         },
         "clarify": {
             "timeout": 120,  # Seconds to wait for a clarify answer before auto-proceeding
@@ -327,9 +333,12 @@ def load_cli_config() -> Dict[str, Any]:
 # Load configuration at module startup
 CLI_CONFIG = load_cli_config()
 
-from rich.console import Console
+from rich import box
+from rich.align import Align
+from rich.console import Console, Group
 from rich.panel import Panel
 from rich.table import Table
+from rich.text import Text
 
 import fire
 
@@ -340,12 +349,53 @@ from model_tools import get_tool_definitions, get_toolset_for_tool
 # Extracted CLI modules (Phase 3)
 from hermes_cli.banner import (
     cprint as _cprint, _GOLD, _BOLD, _DIM, _RST,
-    VERSION, HERMES_AGENT_LOGO, HERMES_CADUCEUS, COMPACT_BANNER,
+    VERSION,
+    HERMES_CADUCEUS,
+    COMPACT_BANNER as STOCK_COMPACT_BANNER,
     get_available_skills as _get_available_skills,
-    build_welcome_banner,
+    build_welcome_banner as build_stock_welcome_banner,
 )
 from hermes_cli.commands import COMMANDS, SlashCommandCompleter
 from hermes_cli import callbacks as _callbacks
+from hermes_cli.skin import (
+    ARES_ASH,
+    ARES_BLOOD,
+    ARES_BRONZE,
+    ARES_CRIMSON,
+    ARES_EMBER,
+    ARES_SAND,
+    ARES_STEEL,
+    COIN_SPIN_FRAMES,
+    DEFAULT_SKIN,
+    DI20_GLYPHS,
+    VALID_SKINS,
+    build_holographic_grid,
+    build_orbit_line,
+    build_progress_meter,
+    build_relay_telemetry,
+    build_scroll_frame,
+    build_speed_line,
+    format_flip_result,
+    get_banner_title,
+    get_caduceus_frame,
+    get_lore_lines,
+    get_mod_brand_name,
+    get_mod_help_footer,
+    get_mod_hint_bar,
+    get_mod_omens_title,
+    get_mod_placeholder_text,
+    get_mod_prompt_frames,
+    get_mod_rituals,
+    get_mod_skin_status_label,
+    get_mod_unit_designation,
+    get_mod_version_title,
+    get_mod_welcome_message,
+    is_ares_skin,
+    load_lore_state,
+    maybe_create_trickster_note,
+    normalize_skin_name,
+    parse_dice_spec,
+)
 from toolsets import get_all_toolsets, get_toolset_info, resolve_toolset, validate_toolset
 
 # Cron job system for scheduled tasks (CRUD only — execution is handled by the gateway)
@@ -378,15 +428,8 @@ def _run_cleanup():
 # ASCII Art & Branding
 # ============================================================================
 
-# Color palette (hex colors for Rich markup):
-# - Gold: #FFD700 (headers, highlights)
-# - Amber: #FFBF00 (secondary highlights)
-# - Bronze: #CD7F32 (tertiary elements)
-# - Light: #FFF8DC (text)
-# - Dim: #B8860B (muted text)
-
 # ANSI building blocks for conversation display
-_GOLD = "\033[1;33m"    # Bold yellow — closest universal match to the gold theme
+_GOLD = "\033[1;31m"
 _BOLD = "\033[1m"
 _DIM = "\033[2m"
 _RST = "\033[0m"
@@ -400,13 +443,13 @@ def _cprint(text: str):
     """
     _pt_print(_PT_ANSI(text))
 
-# ASCII Art - HERMES-AGENT logo (full width, single line - requires ~95 char terminal)
-HERMES_AGENT_LOGO = """[bold #FFD700]██╗  ██╗███████╗██████╗ ███╗   ███╗███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
-[bold #FFD700]██║  ██║██╔════╝██╔══██╗████╗ ████║██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
-[#FFBF00]███████║█████╗  ██████╔╝██╔████╔██║█████╗  ███████╗█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║[/]
-[#FFBF00]██╔══██║██╔══╝  ██╔══██╗██║╚██╔╝██║██╔══╝  ╚════██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║[/]
-[#CD7F32]██║  ██║███████╗██║  ██║██║ ╚═╝ ██║███████╗███████║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/]
-[#CD7F32]╚═╝  ╚═╝╚══════╝╚═╝  ╚═╝╚═╝     ╚═╝╚══════╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/]"""
+# Original Hermes-style block masthead, recolored for Ares.
+HERMES_AGENT_LOGO = """[bold #A3261F] █████╗ ██████╗ ███████╗███████╗       █████╗  ██████╗ ███████╗███╗   ██╗████████╗[/]
+[bold #B73122]██╔══██╗██╔══██╗██╔════╝██╔════╝      ██╔══██╗██╔════╝ ██╔════╝████╗  ██║╚══██╔══╝[/]
+[bold #C93C24]███████║██████╔╝█████╗  ███████╗█████╗███████║██║  ███╗█████╗  ██╔██╗ ██║   ██║[/]
+[bold #D84A28]██╔══██║██╔══██╗██╔══╝  ╚════██║╚════╝██╔══██║██║   ██║██╔══╝  ██║╚██╗██║   ██║[/]
+[bold #E15A2D]██║  ██║██║  ██║███████╗███████║      ██║  ██║╚██████╔╝███████╗██║ ╚████║   ██║[/]
+[bold #EB6C32]╚═╝  ╚═╝╚═╝  ╚═╝╚══════╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═══╝   ╚═╝[/]"""
 
 # ASCII Art - Hermes Caduceus (compact, fits in left panel)
 HERMES_CADUCEUS = """[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⣀⣀⠀⢀⣀⡀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
@@ -427,10 +470,10 @@ HERMES_CADUCEUS = """[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⣀⣀�
 
 # Compact banner for smaller terminals (fallback)
 COMPACT_BANNER = """
-[bold #FFD700]╔══════════════════════════════════════════════════════════════╗[/]
-[bold #FFD700]║[/]  [#FFBF00]⚕ NOUS HERMES[/] [dim #B8860B]- AI Agent Framework[/]              [bold #FFD700]║[/]
-[bold #FFD700]║[/]  [#CD7F32]Messenger of the Digital Gods[/]    [dim #B8860B]Nous Research[/]   [bold #FFD700]║[/]
-[bold #FFD700]╚══════════════════════════════════════════════════════════════╝[/]
+[bold #9F1C1C]╔══════════════════════════════════════════════════════════════╗[/]
+[bold #9F1C1C]║[/]  [#C7A96B]⚔ """ + get_mod_brand_name().upper() + """[/] [dim #6E584B]- Spartan CLI Skin[/]               [bold #9F1C1C]║[/]
+[bold #9F1C1C]║[/]  [#DD4A3A]War-forged terminal interface[/] [dim #6E584B]Nous Research[/]   [bold #9F1C1C]║[/]
+[bold #9F1C1C]╚══════════════════════════════════════════════════════════════╝[/]
 """
 
 
@@ -466,178 +509,180 @@ def _get_available_skills() -> Dict[str, List[str]]:
     return skills_by_category
 
 
-def build_welcome_banner(console: Console, model: str, cwd: str, tools: List[dict] = None, enabled_toolsets: List[str] = None, session_id: str = None):
-    """
-    Build and print a Claude Code-style welcome banner with caduceus on left and info on right.
-    
-    Args:
-        console: Rich Console instance for printing
-        model: The current model name (e.g., "anthropic/claude-opus-4")
-        cwd: Current working directory
-        tools: List of tool definitions
-        enabled_toolsets: List of enabled toolset names
-        session_id: Unique session identifier for logging
-    """
-    from model_tools import check_tool_availability, TOOLSET_REQUIREMENTS
-    
+def build_welcome_banner(
+    console: Console,
+    model: str,
+    cwd: str,
+    tools: List[dict] = None,
+    enabled_toolsets: List[str] = None,
+    session_id: str = None,
+    *,
+    skin: str = DEFAULT_SKIN,
+    lore_state=None,
+    phase: int = 0,
+):
+    """Build and print the CLI welcome banner."""
+    from model_tools import check_tool_availability
+
     tools = tools or []
     enabled_toolsets = enabled_toolsets or []
-    
-    # Get unavailable tools info for coloring
+    lore_state = lore_state or load_lore_state()
+    ares_skin = is_ares_skin(skin)
+
+    if not ares_skin:
+        build_stock_welcome_banner(
+            console=console,
+            model=model,
+            cwd=cwd,
+            tools=tools,
+            enabled_toolsets=enabled_toolsets,
+            session_id=session_id,
+            get_toolset_for_tool=get_toolset_for_tool,
+        )
+        return
+
     _, unavailable_toolsets = check_tool_availability(quiet=True)
     disabled_tools = set()
     for item in unavailable_toolsets:
         disabled_tools.update(item.get("tools", []))
-    
-    # Build the side-by-side content using a table for precise control
-    layout_table = Table.grid(padding=(0, 2))
-    layout_table.add_column("left", justify="center")
-    layout_table.add_column("right", justify="left")
-    
-    # Build left content: caduceus + model info
-    left_lines = ["", HERMES_CADUCEUS, ""]
-    
-    # Shorten model name for display
+
     model_short = model.split("/")[-1] if "/" in model else model
     if len(model_short) > 28:
         model_short = model_short[:25] + "..."
-    
-    left_lines.append(f"[#FFBF00]{model_short}[/] [dim #B8860B]·[/] [dim #B8860B]Nous Research[/]")
-    left_lines.append(f"[dim #B8860B]{cwd}[/]")
-    
-    # Add session ID if provided
-    if session_id:
-        left_lines.append(f"[dim #8B8682]Session: {session_id}[/]")
-    left_content = "\n".join(left_lines)
-    
-    # Build right content: tools list grouped by toolset
-    right_lines = []
-    right_lines.append("[bold #FFBF00]Available Tools[/]")
-    
-    # Group tools by toolset (include all possible tools, both enabled and disabled)
+    cwd_short = cwd if len(cwd) <= 30 else f"...{cwd[-27:]}"
+
     toolsets_dict = {}
-    
-    # First, add all enabled tools
     for tool in tools:
         tool_name = tool["function"]["name"]
-        toolset = get_toolset_for_tool(tool_name) or "other"
-        if toolset not in toolsets_dict:
-            toolsets_dict[toolset] = []
-        toolsets_dict[toolset].append(tool_name)
-    
-    # Also add disabled toolsets so they show in the banner
+        toolset = (get_toolset_for_tool(tool_name) or "other").replace("_tools", "")
+        toolsets_dict.setdefault(toolset, []).append(tool_name)
+
     for item in unavailable_toolsets:
-        # Map the internal toolset ID to display name
         toolset_id = item.get("id", item.get("name", "unknown"))
-        display_name = f"{toolset_id}_tools" if not toolset_id.endswith("_tools") else toolset_id
-        if display_name not in toolsets_dict:
-            toolsets_dict[display_name] = []
+        display_name = str(toolset_id).replace("_tools", "")
+        toolsets_dict.setdefault(display_name, [])
         for tool_name in item.get("tools", []):
             if tool_name not in toolsets_dict[display_name]:
                 toolsets_dict[display_name].append(tool_name)
-    
-    # Display tools grouped by toolset (compact format, max 8 groups)
+
     sorted_toolsets = sorted(toolsets_dict.keys())
     display_toolsets = sorted_toolsets[:8]
     remaining_toolsets = len(sorted_toolsets) - 8
-    
+    skills_by_category = _get_available_skills()
+    total_skills = sum(len(s) for s in skills_by_category.values())
+
+    banner_width = max(getattr(console.size, "width", 160), 120)
+    left_width = min(68, max(58, banner_width // 3 + 10))
+    hero_width = max(52, left_width - 4)
+    hero_height = 32 if banner_width >= 150 else 26
+
+    layout_table = Table.grid(expand=True, padding=(0, 2))
+    layout_table.add_column("left", width=left_width)
+    layout_table.add_column("middle", ratio=1, min_width=56)
+
+    left_lines = [
+        "",
+        get_caduceus_frame(lore_state, phase, width=hero_width, height=hero_height),
+        "",
+        f"[{ARES_BRONZE}]{model_short}[/]  [dim {ARES_ASH}]Nous Research[/]",
+        f"[dim {ARES_ASH}]{cwd_short}[/]",
+    ]
+    if session_id:
+        left_lines.append(f"[dim {ARES_ASH}]Session: {session_id}[/]")
+    left_renderable = Align.center(
+        Text.from_markup("\n".join(left_lines)),
+        vertical="top",
+    )
+
+    accent_toolsets = {"file_tools", "file_tools_tools", "image_gen_tools", "image_gen_tools_tools"}
+    center_lines = [f"[bold {ARES_BRONZE}]Available Tools[/]"]
     for toolset in display_toolsets:
         tool_names = toolsets_dict[toolset]
-        # Color each tool name - red if disabled, normal if enabled
         colored_names = []
         for name in sorted(tool_names):
             if name in disabled_tools:
-                colored_names.append(f"[red]{name}[/]")
+                colored_names.append(f"[{ARES_EMBER}]{name}[/]")
+            elif toolset in accent_toolsets:
+                colored_names.append(f"[{ARES_EMBER}]{name}[/]")
             else:
-                colored_names.append(f"[#FFF8DC]{name}[/]")
-        
-        tools_str = ", ".join(colored_names)
-        # Truncate if too long (accounting for markup)
-        if len(", ".join(sorted(tool_names))) > 45:
-            # Rebuild with truncation
+                colored_names.append(f"[{ARES_SAND}]{name}[/]")
+
+        if len(", ".join(sorted(tool_names))) > 50:
             short_names = []
             length = 0
             for name in sorted(tool_names):
-                if length + len(name) + 2 > 42:
+                if length + len(name) + 2 > 46:
                     short_names.append("...")
                     break
                 short_names.append(name)
                 length += len(name) + 2
-            # Re-color the truncated list
             colored_names = []
             for name in short_names:
                 if name == "...":
                     colored_names.append("[dim]...[/]")
-                elif name in disabled_tools:
-                    colored_names.append(f"[red]{name}[/]")
+                elif name in disabled_tools or toolset in accent_toolsets:
+                    colored_names.append(f"[{ARES_EMBER}]{name}[/]")
                 else:
-                    colored_names.append(f"[#FFF8DC]{name}[/]")
-            tools_str = ", ".join(colored_names)
-        
-        right_lines.append(f"[dim #B8860B]{toolset}:[/] {tools_str}")
-    
+                    colored_names.append(f"[{ARES_SAND}]{name}[/]")
+        center_lines.append(f"[dim {ARES_ASH}]{toolset.replace('_tools', '')}:[/] {', '.join(colored_names)}")
+
     if remaining_toolsets > 0:
-        right_lines.append(f"[dim #B8860B](and {remaining_toolsets} more toolsets...)[/]")
-    
-    right_lines.append("")
-    
-    # Add skills section
-    right_lines.append("[bold #FFBF00]Available Skills[/]")
-    skills_by_category = _get_available_skills()
-    total_skills = sum(len(s) for s in skills_by_category.values())
-    
+        center_lines.append(f"[dim {ARES_ASH}](and {remaining_toolsets} more toolsets...)[/]")
+
+    center_lines.append("")
+    center_lines.append(f"[bold {ARES_BRONZE}]Available Skills[/]")
     if skills_by_category:
-        for category in sorted(skills_by_category.keys()):
+        for category in sorted(skills_by_category.keys())[:12]:
             skill_names = sorted(skills_by_category[category])
-            # Show first 8 skills, then "..." if more
             if len(skill_names) > 8:
                 display_names = skill_names[:8]
                 skills_str = ", ".join(display_names) + f" +{len(skill_names) - 8} more"
             else:
                 skills_str = ", ".join(skill_names)
-            # Truncate if still too long
-            if len(skills_str) > 50:
-                skills_str = skills_str[:47] + "..."
-            right_lines.append(f"[dim #B8860B]{category}:[/] [#FFF8DC]{skills_str}[/]")
+            if len(skills_str) > 58:
+                skills_str = skills_str[:55] + "..."
+            center_lines.append(f"[dim {ARES_ASH}]{category}:[/] [{ARES_SAND}]{skills_str}[/]")
     else:
-        right_lines.append("[dim #B8860B]No skills installed[/]")
-    
-    right_lines.append("")
-    right_lines.append(f"[dim #B8860B]{len(tools)} tools · {total_skills} skills · /help for commands[/]")
-    
-    right_content = "\n".join(right_lines)
-    
-    # Add to table
-    layout_table.add_row(left_content, right_content)
-    
-    # Wrap in a panel with the title
-    outer_panel = Panel(
+        center_lines.append(f"[dim {ARES_ASH}]No skills installed[/]")
+
+    center_lines.append("")
+    center_lines.append(f"[dim {ARES_ASH}]{get_mod_help_footer(len(tools), total_skills)}[/]")
+    center_renderable = Text.from_markup("\n".join(center_lines))
+
+    layout_table.add_row(left_renderable, center_renderable)
+
+    dossier_panel = Panel(
         layout_table,
-        title=f"[bold #FFD700]Hermes Agent {VERSION}[/]",
-        border_style="#CD7F32",
-        padding=(0, 2),
+        title=f"[bold {ARES_BRONZE}]{get_mod_version_title(VERSION)}[/]",
+        title_align="center",
+        subtitle=f"[bold {ARES_CRIMSON}]{get_mod_unit_designation()}[/]",
+        subtitle_align="right",
+        border_style=ARES_BRONZE,
+        box=box.SQUARE,
+        padding=(0, 1),
     )
-    
-    # Print the big HERMES-AGENT logo first (no panel wrapper for full width)
+
     console.print()
     console.print(HERMES_AGENT_LOGO)
-    console.print()
-    
-    # Print the panel with caduceus and info
-    console.print(outer_panel)
+    console.print(dossier_panel)
+    return
 
 
 # ============================================================================
 # CLI Commands
 # ============================================================================
 
-COMMANDS = {
+    COMMANDS = {
     "/help": "Show this help message",
     "/tools": "List available tools",
     "/toolsets": "List available toolsets",
     "/model": "Show or change the current model",
     "/prompt": "View/set custom system prompt",
     "/personality": "Set a predefined personality",
+    "/skin": "Show or change the active visual skin",
+    "/flip": "Flip an Ares coin",
+    "/roll": "Roll Ares dice (supports /roll d20)",
+    "/omens": "Show Ares lore, unlocks, and ritual status",
     "/clear": "Clear screen and reset conversation (fresh start)",
     "/history": "Show conversation history",
     "/new": "Start a new conversation (reset history)",
@@ -745,6 +790,7 @@ class HermesCLI:
         max_turns: int = 60,
         verbose: bool = False,
         compact: bool = False,
+        skin: str = None,
         resume: str = None,
     ):
         """
@@ -759,12 +805,25 @@ class HermesCLI:
             max_turns: Maximum tool-calling iterations (default: 60)
             verbose: Enable verbose logging
             compact: Use compact display mode
+            skin: Visual skin name ("hermes" or "ares")
             resume: Session ID to resume (restores conversation history from SQLite)
         """
         # Initialize Rich console
         self.console = Console()
         self.compact = compact if compact is not None else CLI_CONFIG["display"].get("compact", False)
         self.verbose = verbose if verbose is not None else CLI_CONFIG["agent"].get("verbose", False)
+        self.skin = normalize_skin_name(
+            skin
+            or os.getenv("HERMES_CLI_SKIN")
+            or CLI_CONFIG["display"].get("skin", DEFAULT_SKIN)
+        )
+        self.animate_banner = bool(CLI_CONFIG["display"].get("animate_banner", False))
+        self.ambient_motion = bool(CLI_CONFIG["display"].get("ambient_motion", True))
+        self.easter_eggs = bool(CLI_CONFIG["display"].get("easter_eggs", True))
+        self._banner_phase = 0
+        self._ui_phase = 0
+        self._lore_state = load_lore_state()
+        self._sync_skin_env()
         
         # Configuration - priority: CLI args > env vars > config file
         # Model can come from: CLI arg, LLM_MODEL env, OPENAI_MODEL env (custom endpoint), or config
@@ -848,6 +907,20 @@ class HermesCLI:
         
         # History file for persistent input recall across sessions
         self._history_file = Path.home() / ".hermes_history"
+
+    def _sync_skin_env(self):
+        """Expose display settings to modules that only see environment state."""
+        os.environ["HERMES_CLI_SKIN"] = self.skin
+        os.environ["HERMES_CLI_MOTION"] = "1" if self.ambient_motion else "0"
+        os.environ["HERMES_CLI_EASTER_EGGS"] = "1" if self.easter_eggs else "0"
+
+    def _refresh_lore(self):
+        """Reload Hermes lore counters from local state."""
+        self._lore_state = load_lore_state(getattr(self, "_session_db", None))
+
+    def _ares_skin_active(self) -> bool:
+        """True when the Ares mod skin is enabled and not in compact mode."""
+        return is_ares_skin(self.skin) and not self.compact
 
     def _ensure_runtime_credentials(self) -> bool:
         """
@@ -967,20 +1040,19 @@ class HermesCLI:
             return False
     
     def show_banner(self):
-        """Display the welcome banner in Claude Code style."""
+        """Display the welcome banner for the active skin."""
         self.console.clear()
-        
+
         if self.compact:
-            self.console.print(COMPACT_BANNER)
+            if is_ares_skin(self.skin):
+                self.console.print(COMPACT_BANNER)
+            else:
+                self.console.print(STOCK_COMPACT_BANNER)
             self._show_status()
         else:
-            # Get tools for display
             tools = get_tool_definitions(enabled_toolsets=self.enabled_toolsets, quiet_mode=True)
-            
-            # Get terminal working directory (where commands will execute)
             cwd = os.getenv("TERMINAL_CWD", os.getcwd())
-            
-            # Build and display the banner
+            self._refresh_lore()
             build_welcome_banner(
                 console=self.console,
                 model=self.model,
@@ -988,11 +1060,14 @@ class HermesCLI:
                 tools=tools,
                 enabled_toolsets=self.enabled_toolsets,
                 session_id=self.session_id,
+                skin=self.skin,
+                lore_state=self._lore_state,
+                phase=self._banner_phase,
             )
-        
+            self._banner_phase += 1
+
         # Show tool availability warnings if any tools are disabled
         self._show_tool_availability_warnings()
-        
         self.console.print()
     
     def _show_tool_availability_warnings(self):
@@ -1037,15 +1112,15 @@ class HermesCLI:
         # Build status line with proper markup
         toolsets_info = ""
         if self.enabled_toolsets and "all" not in self.enabled_toolsets:
-            toolsets_info = f" [dim #B8860B]·[/] [#CD7F32]toolsets: {', '.join(self.enabled_toolsets)}[/]"
+            toolsets_info = f" [dim {ARES_ASH}]·[/] [{ARES_BRONZE}]toolsets: {', '.join(self.enabled_toolsets)}[/]"
 
-        provider_info = f" [dim #B8860B]·[/] [dim]provider: {self.provider}[/]"
+        provider_info = f" [dim {ARES_ASH}]·[/] [dim]provider: {self.provider}[/]"
         if self.provider == "nous" and self._nous_key_source:
-            provider_info += f" [dim #B8860B]·[/] [dim]key: {self._nous_key_source}[/]"
+            provider_info += f" [dim {ARES_ASH}]·[/] [dim]key: {self._nous_key_source}[/]"
 
         self.console.print(
-            f"  {api_indicator} [#FFBF00]{model_short}[/] "
-            f"[dim #B8860B]·[/] [bold cyan]{tool_count} tools[/]"
+            f"  {api_indicator} [{ARES_BRONZE}]{model_short}[/] "
+            f"[dim {ARES_ASH}]·[/] [bold {ARES_EMBER}]{tool_count} tools[/]"
             f"{toolsets_info}{provider_info}"
         )
     
@@ -1061,8 +1136,146 @@ class HermesCLI:
             print(f"  {cmd:<15} - {desc}")
         
         print()
-        print("  Tip: Just type your message to chat with Hermes!")
+        assistant_name = "Ares" if self._ares_skin_active() else "Hermes"
+        print(f"  Tip: Just type your message to chat with {assistant_name}!")
+        print("  Bonus: type 'flip coin' or 'roll dice' for local rituals")
         print("  Multi-line: Alt+Enter for a new line")
+        print()
+
+    def _set_skin(self, new_skin: str, *, persist: bool = False):
+        """Apply a new visual skin to the active session."""
+        normalized = normalize_skin_name(new_skin)
+        self.skin = normalized
+        self._banner_phase = 0
+        self._sync_skin_env()
+        if persist:
+            save_config_value("display.skin", normalized)
+
+    def _animate_inline_frames(self, frames: List[str], delay: float = 0.07):
+        """Run a lightweight inline terminal animation."""
+        if not frames:
+            return
+        out = sys.stdout
+        width = max(len(frame) for frame in frames)
+        for frame in frames:
+            try:
+                out.write("\r" + frame.ljust(width))
+                out.flush()
+            except (ValueError, OSError):
+                break
+            time.sleep(delay)
+        try:
+            out.write("\r" + (" " * width) + "\r")
+            out.flush()
+        except (ValueError, OSError):
+            pass
+
+    def _play_coin_flip(self):
+        """Animate a coin flip easter egg."""
+        result = random.choice(("heads", "tails"))
+        frames = [f"  ⚔ Ares flips the coin {frame}" for frame in COIN_SPIN_FRAMES]
+        print()
+        self._animate_inline_frames(frames)
+        _cprint(f"{_GOLD}◉{_RST} {_BOLD}{format_flip_result(result)}{_RST}")
+
+    def _play_dice_roll(self, spec: str = None):
+        """Animate a dice roll easter egg."""
+        sides = parse_dice_spec(spec)
+        result = random.randint(1, sides)
+        cheat_note = ""
+        if self._ares_skin_active() and sides >= 6 and random.random() < 0.25 and result < sides:
+            nudged = result + 1
+            cheat_note = f" Ares nudged it from {result} to {nudged}."
+            result = nudged
+
+        frames = [f"  ⚔ Ares rolls d{sides} {glyph}" for glyph in DI20_GLYPHS * 2]
+        print()
+        self._animate_inline_frames(frames, delay=0.06)
+        _cprint(f"{_GOLD}◉{_RST} {_BOLD}d{sides}: {result}{_RST}{_DIM}{cheat_note}{_RST}")
+
+    def _maybe_handle_local_ritual(self, user_input: str) -> bool:
+        """Handle local mini-games before sending text to the model."""
+        normalized = user_input.strip().lower()
+        if normalized in {"flip coin", "coin flip"}:
+            self._play_coin_flip()
+            return True
+        if normalized in {"roll dice", "dice roll"}:
+            self._play_dice_roll()
+            return True
+        return False
+
+    def _format_hermes_scroll_body(self, response: str) -> str:
+        """Decorate assistant text with a cleaner gutter inside the Hermes scroll."""
+        marker_cycle = ["╎", "┆", "╎", "┊"]
+        marker = marker_cycle[self._ui_phase % len(marker_cycle)]
+        lines = response.splitlines() or [response]
+        formatted_lines = []
+        for line in lines:
+            if line.strip():
+                formatted_lines.append(f"{_DIM}{marker}{_RST} {line}")
+            else:
+                formatted_lines.append(f"{_DIM}{marker}{_RST}")
+        return "\n".join(formatted_lines)
+
+    def show_omens(self):
+        """Display Ares lore progression and ritual status."""
+        self._refresh_lore()
+        next_wing_unlock = max(0, 50 - self._lore_state.sessions)
+        next_glow_unlock = max(0, 100 - self._lore_state.clever_replies)
+        orbiting = ", ".join(self._lore_state.orbiting_skills) if self._lore_state.orbiting_skills else "awaiting published scrolls"
+
+        if self._ares_skin_active():
+            rituals = get_mod_rituals()
+            omens_lines = [
+                f"[bold {ARES_EMBER}]{get_mod_skin_status_label()}[/] [{ARES_SAND}]{self.skin}[/]",
+                build_progress_meter("Shield rise", self._lore_state.sessions, 50, width=18),
+                build_progress_meter("Ember glow", self._lore_state.clever_replies, 100, width=18),
+                build_progress_meter("Scroll orbit", len(self._lore_state.orbiting_skills), 4, width=18),
+                f"[dim {ARES_ASH}]{build_relay_telemetry(self._lore_state, self._ui_phase, 46, active=False)}[/]",
+                f"[dim {ARES_BRONZE}]{build_orbit_line(self._lore_state, self._ui_phase, 42)}[/]",
+                "",
+                f"[{ARES_SAND}]Shield tier[/] [dim {ARES_ASH}]{self._lore_state.wing_level}[/]  [{ARES_SAND}]Ember glow[/] [dim {ARES_ASH}]{self._lore_state.glow_enabled}[/]",
+                f"[{ARES_SAND}]Next shield rise[/] [dim {ARES_ASH}]{next_wing_unlock} session(s)[/]  [{ARES_SAND}]Next glow[/] [dim {ARES_ASH}]{next_glow_unlock} clever repl(y/ies)[/]",
+                f"[{ARES_SAND}]Orbiting skills[/] [dim {ARES_ASH}]{orbiting}[/]",
+                "",
+                f"[bold {ARES_BRONZE}]Rituals[/]",
+            ]
+            omens_lines.extend(
+                f"[{ARES_SAND}]{command}[/] [dim {ARES_ASH}]{description}[/]"
+                for command, description in rituals
+            )
+            self.console.print()
+            self.console.print(
+                Panel(
+                    Text.from_markup("\n".join(omens_lines)),
+                    title=f"[bold {ARES_BRONZE}]{get_mod_omens_title()}[/]",
+                    border_style=ARES_BLOOD,
+                    box=box.ROUNDED,
+                    padding=(0, 1),
+                )
+            )
+            self.console.print()
+            return
+
+        print()
+        print("+" + "-" * 64 + "+")
+        title = get_mod_omens_title()
+        print("|" + " " * max(0, 32 - len(title) // 2) + title + " " * max(0, 64 - 2 - max(0, 32 - len(title) // 2) - len(title)) + "|")
+        print("+" + "-" * 64 + "+")
+        print()
+        print(f"  Skin:            {self.skin}")
+        print(f"  Sessions:        {self._lore_state.sessions}")
+        print(f"  Clever replies:  {self._lore_state.clever_replies}")
+        print(f"  Wing tier:       {self._lore_state.wing_level}")
+        print(f"  Golden glow:     {self._lore_state.glow_enabled}")
+        print(f"  Orbiting skills: {orbiting}")
+        print()
+        print(f"  Next shields:    {next_wing_unlock} session(s)")
+        print(f"  Next glow:       {next_glow_unlock} clever repl(y/ies)")
+        print()
+        print("  Rituals:")
+        for command, description in get_mod_rituals():
+            print(f"    {command:<11} {description}")
         print()
     
     def show_tools(self):
@@ -1169,6 +1382,11 @@ class HermesCLI:
         print(f"  Toolsets:   {', '.join(self.enabled_toolsets) if self.enabled_toolsets else 'all'}")
         print(f"  Verbose:    {self.verbose}")
         print()
+        print("  -- Display --")
+        print(f"  Skin:       {self.skin}")
+        print(f"  Motion:     {self.ambient_motion}")
+        print(f"  EasterEggs: {self.easter_eggs}")
+        print()
         print("  -- Session --")
         print(f"  Started:     {self.session_start.strftime('%Y-%m-%d %H:%M:%S')}")
         print(f"  Config File: cli-config.yaml {config_status}")
@@ -1193,7 +1411,7 @@ class HermesCLI:
                 print(f"\n  [You #{i}]")
                 print(f"    {content[:200]}{'...' if len(content) > 200 else ''}")
             elif role == "assistant":
-                print(f"\n  [Hermes #{i}]")
+                print(f"\n  [Ares #{i}]")
                 preview = content[:200] if content else "(tool calls)"
                 print(f"    {preview}{'...' if len(str(content)) > 200 else ''}")
         
@@ -1638,6 +1856,33 @@ class HermesCLI:
         elif cmd_lower.startswith("/personality"):
             # Use original case (handler lowercases the personality name itself)
             self._handle_personality_command(cmd_original)
+        elif cmd_lower.startswith("/skin"):
+            parts = cmd_original.split(maxsplit=1)
+            if len(parts) == 1:
+                print(f"Active skin: {self.skin}")
+                print("  Usage: /skin hermes|ares")
+            else:
+                raw_skin = parts[1].strip().lower().replace("-", "_")
+                requested_skin = {
+                    "default": DEFAULT_SKIN,
+                    "classic": "hermes",
+                    "classic_gold": "hermes",
+                    "winged": "ares",
+                    "holographic": "ares",
+                }.get(raw_skin, raw_skin)
+                if requested_skin not in VALID_SKINS:
+                    print(f"(._.) Unknown skin: {parts[1]}")
+                else:
+                    self._set_skin(requested_skin, persist=True)
+                    self.show_banner()
+                    print(f"  ✨ Skin set to {requested_skin} (saved to config)\n")
+        elif cmd_lower.startswith("/flip"):
+            self._play_coin_flip()
+        elif cmd_lower.startswith("/roll"):
+            parts = cmd_original.split(maxsplit=1)
+            self._play_dice_roll(parts[1] if len(parts) > 1 else None)
+        elif cmd_lower == "/omens":
+            self.show_omens()
         elif cmd_lower == "/retry":
             retry_msg = self.retry_last()
             if retry_msg and hasattr(self, '_pending_input'):
@@ -1655,7 +1900,7 @@ class HermesCLI:
             self._show_gateway_status()
         else:
             self.console.print(f"[bold red]Unknown command: {cmd_lower}[/]")
-            self.console.print("[dim #B8860B]Type /help for available commands[/]")
+            self.console.print(f"[dim {ARES_ASH}]Type /help for available commands[/]")
         
         return True
     
@@ -1836,7 +2081,8 @@ class HermesCLI:
         self.conversation_history.append({"role": "user", "content": message})
         
         w = self.console.width
-        _cprint(f"{_GOLD}{'─' * w}{_RST}")
+        separator = build_speed_line(w, self._banner_phase) if self._ares_skin_active() else ("─" * w)
+        _cprint(f"{_GOLD}{separator}{_RST}")
         print(flush=True)
         
         try:
@@ -1911,14 +2157,28 @@ class HermesCLI:
             
             if response:
                 w = self.console.width
-                label = " ⚕ Hermes "
-                fill = w - 2 - len(label)  # 2 for ╭ and ╮
-                top = f"{_GOLD}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}"
-                bot = f"{_GOLD}╰{'─' * (w - 2)}╯{_RST}"
+                if self._ares_skin_active():
+                    self._refresh_lore()
+                    top, subtitle, bot = build_scroll_frame(w, self._lore_state, self._banner_phase)
+                    body = self._format_hermes_scroll_body(response)
+                    trickster_note = maybe_create_trickster_note(
+                        message,
+                        enabled=self.easter_eggs,
+                    )
+                    rendered = f"\n{_GOLD}{top}{_RST}\n{_DIM}{subtitle}{_RST}\n{body}"
+                    if trickster_note:
+                        rendered += f"\n\n{_DIM}╎ {trickster_note}{_RST}"
+                    rendered += f"\n\n{_GOLD}{bot}{_RST}"
+                    _cprint(rendered)
+                else:
+                    label = " ⚔ Ares " if self._ares_skin_active() else " ⚕ Hermes "
+                    fill = w - 2 - len(label)  # 2 for ╭ and ╮
+                    top = f"{_GOLD}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}"
+                    bot = f"{_GOLD}╰{'─' * (w - 2)}╯{_RST}"
 
-                # Render box + response as a single _cprint call so
-                # nothing can interleave between the box borders.
-                _cprint(f"\n{top}\n{response}\n\n{bot}")
+                    # Render box + response as a single _cprint call so
+                    # nothing can interleave between the box borders.
+                    _cprint(f"\n{top}\n{response}\n\n{bot}")
             
             # Combine all interrupt messages (user may have typed multiple while waiting)
             # and re-queue as one prompt for process_loop
@@ -1965,12 +2225,18 @@ class HermesCLI:
             print(f"Duration:       {duration_str}")
             print(f"Messages:       {msg_count} ({user_msgs} user, {tool_calls} tool calls)")
         else:
-            print("Goodbye! ⚕")
+            print("Goodbye! ⚔")
 
     def run(self):
         """Run the interactive CLI loop with persistent input at bottom."""
         self.show_banner()
-        self.console.print("[#FFF8DC]Welcome to Hermes Agent! Type your message or /help for commands.[/]")
+        welcome_message = (
+            get_mod_welcome_message()
+            if self._ares_skin_active()
+            else "Welcome to Hermes Agent! Type your message or /help for commands."
+        )
+        welcome_color = ARES_SAND if self._ares_skin_active() else "#FFF8DC"
+        self.console.print(f"[{welcome_color}]{welcome_message}[/]")
         self.console.print()
         
         # State for async operation
@@ -2172,9 +2438,26 @@ class HermesCLI:
             self._should_exit = True
             event.app.exit()
         
-        # Dynamic prompt: shows Hermes symbol when agent is working,
+        # Dynamic prompt: shows the Ares symbol when the agent is working,
         # or answer prompt when clarify freetext mode is active.
         cli_ref = self
+
+        def _rule_line(offset: int = 0) -> str:
+            width = max((cli_ref.console.width or 80) - 2, 24)
+            if not cli_ref._ares_skin_active():
+                return "─" * width
+            base = ["─"] * width
+            marker = (cli_ref._ui_phase * 2 + (offset * 11)) % width
+            head = list("▲╸╸") if cli_ref._agent_running else list("⚔╸")
+            for idx, char in enumerate(head):
+                base[(marker + idx) % width] = char
+            if not cli_ref._agent_running:
+                partner = (marker + (width // 2)) % width
+                base[partner] = "△"
+            if width > 24:
+                base[(marker + (width // 3)) % width] = "╳"
+                base[(marker + (2 * width // 3)) % width] = "╳"
+            return "".join(base)
 
         def get_prompt():
             if cli_ref._sudo_state:
@@ -2185,8 +2468,14 @@ class HermesCLI:
                 return [('class:clarify-selected', '✎ ❯ ')]
             if cli_ref._clarify_state:
                 return [('class:prompt-working', '? ❯ ')]
+            if cli_ref._ares_skin_active():
+                if cli_ref._agent_running:
+                    frames = get_mod_prompt_frames(active=True)
+                    return [('class:prompt-flight', frames[cli_ref._ui_phase % len(frames)])]
+                idle_frames = get_mod_prompt_frames(active=False)
+                return [('class:prompt', idle_frames[cli_ref._ui_phase % len(idle_frames)])]
             if cli_ref._agent_running:
-                return [('class:prompt-working', '⚕ ❯ ')]
+                return [('class:prompt-working', '⚔ ❯ ')]
             return [('class:prompt', '❯ ')]
 
         # Create the input area with multiline (shift+enter), autocomplete, and paste handling
@@ -2276,6 +2565,8 @@ class HermesCLI:
                 return ""
             if cli_ref._agent_running:
                 return "type a message + Enter to interrupt, Ctrl+C to cancel"
+            if cli_ref._ares_skin_active():
+                return get_mod_placeholder_text()
             return ""
 
         input_area.control.input_processors.append(_PlaceholderProcessor(_get_placeholder))
@@ -2313,13 +2604,35 @@ class HermesCLI:
                     ('class:clarify-countdown', countdown),
                 ]
 
+            if cli_ref._ares_skin_active():
+                glyphs = ['▲', '△', '✦', '⚔']
+                glyph = glyphs[cli_ref._ui_phase % len(glyphs)]
+                telemetry = build_relay_telemetry(
+                    cli_ref._lore_state,
+                    cli_ref._ui_phase,
+                    min((cli_ref.console.width or 80) - 4, 60),
+                    active=cli_ref._agent_running,
+                )
+                if cli_ref._agent_running:
+                    return [
+                        ('class:hint-bar', get_mod_hint_bar(True, glyph, len(cli_ref._lore_state.orbiting_skills))),
+                        ('', '\n'),
+                        ('class:hint-telemetry', f'  {telemetry}'),
+                    ]
+                orbit_count = len(cli_ref._lore_state.orbiting_skills)
+                return [
+                    ('class:hint-bar', get_mod_hint_bar(False, glyph, orbit_count)),
+                    ('', '\n'),
+                    ('class:hint-telemetry', f'  {telemetry}'),
+                ]
+
             return []
 
         def get_hint_height():
             if cli_ref._sudo_state or cli_ref._approval_state or cli_ref._clarify_state:
                 return 1
-            # Keep a 1-line spacer while agent runs so output doesn't push
-            # right up against the top rule of the input area
+            if cli_ref._ares_skin_active():
+                return 2
             return 1 if cli_ref._agent_running else 0
 
         spacer = Window(
@@ -2342,7 +2655,8 @@ class HermesCLI:
             lines = []
             # Box top border
             lines.append(('class:clarify-border', '╭─ '))
-            lines.append(('class:clarify-title', 'Hermes needs your input'))
+            clarify_title = 'Ares needs your input' if cli_ref._ares_skin_active() else 'Hermes needs your input'
+            lines.append(('class:clarify-title', clarify_title))
             lines.append(('class:clarify-border', ' ─────────────────────────────╮\n'))
             lines.append(('class:clarify-border', '│\n'))
 
@@ -2465,11 +2779,11 @@ class HermesCLI:
         # Horizontal rules above and below the input (bronze, 1 line each).
         # The bottom rule moves down as the TextArea grows with newlines.
         input_rule_top = Window(
-            content=FormattedTextControl([('class:input-rule', '─' * 200)]),
+            content=FormattedTextControl(lambda: [('class:input-rule', _rule_line(0))]),
             height=1,
         )
         input_rule_bot = Window(
-            content=FormattedTextControl([('class:input-rule', '─' * 200)]),
+            content=FormattedTextControl(lambda: [('class:input-rule', _rule_line(1))]),
             height=1,
         )
 
@@ -2489,41 +2803,49 @@ class HermesCLI:
                 CompletionsMenu(max_height=12, scroll_offset=1),
             ])
         )
-        
+
+        input_text_color = ARES_SAND if self._ares_skin_active() else '#FFF8DC'
+        accent_color = ARES_CRIMSON if self._ares_skin_active() else '#CD7F32'
+        title_color = ARES_BRONZE if self._ares_skin_active() else '#FFD700'
+        menu_bg = '#1c1212' if self._ares_skin_active() else '#1a1a2e'
+        menu_current_bg = '#3a1717' if self._ares_skin_active() else '#333355'
+
         # Style for the application
         style = PTStyle.from_dict({
-            'input-area': '#FFF8DC',
+            'input-area': input_text_color,
             'placeholder': '#555555 italic',
-            'prompt': '#FFF8DC',
+            'prompt': input_text_color,
             'prompt-working': '#888888 italic',
+            'prompt-flight': f'{title_color} bold',
             'hint': '#555555 italic',
-            # Bronze horizontal rules around the input area
-            'input-rule': '#CD7F32',
-            'completion-menu': 'bg:#1a1a2e #FFF8DC',
-            'completion-menu.completion': 'bg:#1a1a2e #FFF8DC',
-            'completion-menu.completion.current': 'bg:#333355 #FFD700',
-            'completion-menu.meta.completion': 'bg:#1a1a2e #888888',
-            'completion-menu.meta.completion.current': 'bg:#333355 #FFBF00',
+            'hint-bar': f'{accent_color} italic',
+            'hint-telemetry': ARES_ASH,
+            'input-rule': accent_color,
+            'completion-menu': f'bg:{menu_bg} {input_text_color}',
+            'completion-menu.completion': f'bg:{menu_bg} {input_text_color}',
+            'completion-menu.completion.current': f'bg:{menu_current_bg} {title_color}',
+            'completion-menu.meta.completion': f'bg:{menu_bg} #888888',
+            'completion-menu.meta.completion.current': f'bg:{menu_current_bg} {accent_color}',
             # Clarify question panel
-            'clarify-border': '#CD7F32',
-            'clarify-title': '#FFD700 bold',
-            'clarify-question': '#FFF8DC bold',
+            'clarify-border': accent_color,
+            'clarify-title': f'{title_color} bold',
+            'clarify-question': f'{input_text_color} bold',
             'clarify-choice': '#AAAAAA',
-            'clarify-selected': '#FFD700 bold',
-            'clarify-active-other': '#FFD700 italic',
-            'clarify-countdown': '#CD7F32',
+            'clarify-selected': f'{title_color} bold',
+            'clarify-active-other': f'{title_color} italic',
+            'clarify-countdown': accent_color,
             # Sudo password panel
             'sudo-prompt': '#FF6B6B bold',
-            'sudo-border': '#CD7F32',
+            'sudo-border': accent_color,
             'sudo-title': '#FF6B6B bold',
-            'sudo-text': '#FFF8DC',
+            'sudo-text': input_text_color,
             # Dangerous command approval panel
-            'approval-border': '#CD7F32',
+            'approval-border': accent_color,
             'approval-title': '#FF8C00 bold',
-            'approval-desc': '#FFF8DC bold',
+            'approval-desc': f'{input_text_color} bold',
             'approval-cmd': '#AAAAAA italic',
             'approval-choice': '#AAAAAA',
-            'approval-selected': '#FFD700 bold',
+            'approval-selected': f'{title_color} bold',
         })
         
         # Create the application
@@ -2535,6 +2857,20 @@ class HermesCLI:
             mouse_support=False,
         )
         self._app = app  # Store reference for clarify_callback
+
+        if self._ares_skin_active():
+            def animation_loop():
+                while not self._should_exit:
+                    if self.ambient_motion or self._agent_running:
+                        self._ui_phase = (self._ui_phase + 1) % 10_000
+                        try:
+                            if app.is_running:
+                                app.invalidate()
+                        except Exception:
+                            pass
+                    time.sleep(0.12 if self._agent_running else 0.22)
+
+            threading.Thread(target=animation_loop, daemon=True).start()
         
         # Background thread to process inputs and run agent
         def process_loop():
@@ -2582,6 +2918,9 @@ class HermesCLI:
                         else:
                             print()
                             _cprint(f"{_GOLD}●{_RST} {_BOLD}{user_input}{_RST}")
+
+                    if self._maybe_handle_local_ritual(user_input):
+                        continue
                     
                     # Regular chat - run agent
                     self._agent_running = True
@@ -2634,6 +2973,18 @@ class HermesCLI:
 # Main Entry Point
 # ============================================================================
 
+def _resolve_invoked_skin(requested_skin: str | None) -> str | None:
+    """Prefer an explicit skin, otherwise infer it from the launcher name."""
+    if requested_skin:
+        return requested_skin
+    invoked_as = Path(sys.argv[0]).name.lower()
+    if invoked_as.startswith("ares"):
+        return "ares"
+    if invoked_as.startswith("hermes"):
+        return "hermes"
+    return None
+
+
 def main(
     query: str = None,
     q: str = None,
@@ -2645,6 +2996,7 @@ def main(
     max_turns: int = 60,
     verbose: bool = False,
     compact: bool = False,
+    skin: str = None,
     list_tools: bool = False,
     list_toolsets: bool = False,
     gateway: bool = False,
@@ -2664,6 +3016,7 @@ def main(
         max_turns: Maximum tool-calling iterations (default: 60)
         verbose: Enable verbose logging
         compact: Use compact display mode
+        skin: Visual skin name ("hermes" or "ares")
         list_tools: List available tools and exit
         list_toolsets: List available toolsets and exit
         resume: Resume a previous session by its ID (e.g., 20260225_143052_a1b2c3)
@@ -2689,6 +3042,7 @@ def main(
     
     # Handle query shorthand
     query = query or q
+    skin = _resolve_invoked_skin(skin)
     
     # Parse toolsets - handle both string and tuple/list inputs
     # Default to hermes-cli toolset which includes cronjob management tools
@@ -2722,6 +3076,7 @@ def main(
         max_turns=max_turns,
         verbose=verbose,
         compact=compact,
+        skin=skin,
         resume=resume,
     )
     
@@ -2743,7 +3098,8 @@ def main(
     if query:
         cli.show_banner()
         cli.console.print(f"[bold blue]Query:[/] {query}")
-        cli.chat(query)
+        if not cli._maybe_handle_local_ritual(query):
+            cli.chat(query)
         cli._print_exit_summary()
         return
     

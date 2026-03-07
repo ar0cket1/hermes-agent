@@ -16,6 +16,32 @@ _RED = "\033[31m"
 _RESET = "\033[0m"
 
 
+def _hermes_skin_enabled() -> bool:
+    """Return True when the CLI requested the Hermes visual skin."""
+    try:
+        from hermes_cli.skin import is_ares_skin
+
+        return is_ares_skin(os.getenv("HERMES_CLI_SKIN"))
+    except Exception:
+        return False
+
+
+def _spinner_wings(frame_idx: int) -> tuple[str, str]:
+    """Wing/sandal sidecars for the Hermes skin spinner."""
+    try:
+        from hermes_cli.skin import get_mod_spinner_wings
+
+        return get_mod_spinner_wings(frame_idx)
+    except Exception:
+        variants = [
+            ("⟪⚔", "⚔⟫"),
+            ("⟪▲", "▲⟫"),
+            ("⟪╸", "╺⟫"),
+            ("⟪⛨", "⛨⟫"),
+        ]
+        return variants[frame_idx % len(variants)]
+
+
 # =========================================================================
 # Tool preview (one-line summary of a tool call's primary argument)
 # =========================================================================
@@ -152,6 +178,16 @@ class KawaiiSpinner:
         "deliberating", "mulling", "reflecting", "processing", "reasoning",
         "analyzing", "computing", "synthesizing", "formulating", "brainstorming",
     ]
+    HERMES_WAITING = [
+        "(⚔)", "(⛨)", "(▲)", "(<> )", "(/)",
+    ]
+    HERMES_THINKING = [
+        "(⚔)", "(⛨)", "(▲)", "(⌁)", "(<> )",
+    ]
+    HERMES_VERBS = [
+        "forging", "marching", "sizing the field", "holding the line",
+        "hammering plans", "tempering steel", "plotting impact", "raising the shield",
+    ]
 
     def __init__(self, message: str = "", spinner_type: str = 'dots'):
         self.message = message
@@ -181,7 +217,11 @@ class KawaiiSpinner:
                 continue
             frame = self.spinner_frames[self.frame_idx % len(self.spinner_frames)]
             elapsed = time.time() - self.start_time
-            line = f"  {frame} {self.message} ({elapsed:.1f}s)"
+            if _hermes_skin_enabled():
+                left, right = _spinner_wings(self.frame_idx)
+                line = f"  {left} {frame} {self.message} {right} ({elapsed:.1f}s)"
+            else:
+                line = f"  {frame} {self.message} ({elapsed:.1f}s)"
             clear = '\r' + ' ' * self.last_line_len + '\r'
             self._write(clear + line, end='', flush=True)
             self.last_line_len = len(line)
@@ -256,6 +296,48 @@ KAWAII_GENERIC = [
 ]
 
 
+def get_waiting_face() -> str:
+    """Choose a themed waiting face for the spinner."""
+    if _hermes_skin_enabled():
+        try:
+            from hermes_cli.skin import get_mod_waiting_faces
+
+            faces = get_mod_waiting_faces()
+        except Exception:
+            faces = KawaiiSpinner.HERMES_WAITING
+    else:
+        faces = KawaiiSpinner.KAWAII_WAITING
+    return random.choice(faces)
+
+
+def get_thinking_face() -> str:
+    """Choose a themed thinking face for the spinner."""
+    if _hermes_skin_enabled():
+        try:
+            from hermes_cli.skin import get_mod_thinking_faces
+
+            faces = get_mod_thinking_faces()
+        except Exception:
+            faces = KawaiiSpinner.HERMES_THINKING
+    else:
+        faces = KawaiiSpinner.KAWAII_THINKING
+    return random.choice(faces)
+
+
+def get_thinking_verb() -> str:
+    """Choose a themed thinking verb for the spinner."""
+    if _hermes_skin_enabled():
+        try:
+            from hermes_cli.skin import get_mod_thinking_verbs
+
+            verbs = get_mod_thinking_verbs()
+        except Exception:
+            verbs = KawaiiSpinner.HERMES_VERBS
+    else:
+        verbs = KawaiiSpinner.THINKING_VERBS
+    return random.choice(verbs)
+
+
 # =========================================================================
 # Cute tool message (completion line that replaces the spinner)
 # =========================================================================
@@ -311,6 +393,8 @@ def get_cute_tool_message(
 
     def _wrap(line: str) -> str:
         """Append failure suffix when the tool failed."""
+        if _hermes_skin_enabled():
+            line = line.replace("┊", "╎⟫", 1)
         if not is_failure:
             return line
         return f"{line}{failure_suffix}"

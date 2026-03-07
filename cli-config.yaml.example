@@ -446,3 +446,11 @@ delegation:
 display:
   # Use compact banner mode
   compact: false
+  # Active visual skin: hermes | ares
+  skin: hermes
+  # Brief animated banner flourish on startup
+  animate_banner: false
+  # Hermes-only motion accents for separators and spinner styling
+  ambient_motion: true
+  # Enable coin flip / dice rituals and rare trickster notes
+  easter_eggs: true

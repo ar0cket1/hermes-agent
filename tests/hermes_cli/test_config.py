@@ -44,6 +44,7 @@ class TestLoadConfigDefaults:
             assert config["max_turns"] == DEFAULT_CONFIG["max_turns"]
             assert "terminal" in config
             assert config["terminal"]["backend"] == "local"
+            assert config["display"]["skin"] == "hermes"
 
 
 class TestSaveAndLoadRoundtrip:

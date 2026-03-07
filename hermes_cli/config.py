@@ -82,6 +82,10 @@ DEFAULT_CONFIG = {
     
     "display": {
         "compact": False,
+        "skin": "hermes",
+        "animate_banner": False,
+        "ambient_motion": True,
+        "easter_eggs": True,
         "personality": "kawaii",
     },
     

@@ -87,6 +87,7 @@ from agent.prompt_builder import build_skills_system_prompt, build_context_files
 from agent.display import (
     KawaiiSpinner, build_tool_preview as _build_tool_preview,
     get_cute_tool_message as _get_cute_tool_message_impl,
+    get_thinking_face, get_thinking_verb, get_waiting_face,
 )
 from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
@@ -1495,7 +1496,7 @@ class AIAgent:
                     spinner_label = f"🔀 {goal_preview}" if goal_preview else "🔀 delegating"
                 spinner = None
                 if self.quiet_mode:
-                    face = random.choice(KawaiiSpinner.KAWAII_WAITING)
+                    face = get_waiting_face()
                     spinner = KawaiiSpinner(f"{face} {spinner_label}", spinner_type='dots')
                     spinner.start()
                 self._delegate_spinner = spinner
@@ -1520,7 +1521,7 @@ class AIAgent:
                     elif self.quiet_mode:
                         print(f"  {cute_msg}")
             elif self.quiet_mode:
-                face = random.choice(KawaiiSpinner.KAWAII_WAITING)
+                face = get_waiting_face()
                 tool_emoji_map = {
                     'web_search': '🔍', 'web_extract': '📄', 'web_crawl': '🕸️',
                     'terminal': '💻', 'process': '⚙️',
@@ -1541,6 +1542,7 @@ class AIAgent:
                 preview = _build_tool_preview(function_name, function_args) or function_name
                 if len(preview) > 30:
                     preview = preview[:27] + "..."
+                face = get_waiting_face()
                 spinner = KawaiiSpinner(f"{face} {emoji} {preview}", spinner_type='dots')
                 spinner.start()
                 _spinner_result = None
@@ -1843,8 +1845,8 @@ class AIAgent:
                 print(f"{self.log_prefix}   🔧 Available tools: {len(self.tools) if self.tools else 0}")
             else:
                 # Animated thinking spinner in quiet mode
-                face = random.choice(KawaiiSpinner.KAWAII_THINKING)
-                verb = random.choice(KawaiiSpinner.THINKING_VERBS)
+                face = get_thinking_face()
+                verb = get_thinking_verb()
                 spinner_type = random.choice(['brain', 'sparkle', 'pulse', 'moon', 'star'])
                 thinking_spinner = KawaiiSpinner(f"{face} {verb}...", spinner_type=spinner_type)
                 thinking_spinner.start()
