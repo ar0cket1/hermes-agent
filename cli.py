@@ -1959,12 +1959,10 @@ class HermesCLI:
                     self.agent.flush_memories(self.conversation_history)
                 except Exception:
                     pass
-            # Clear terminal screen using Rich (portable, no shell needed)
-            self.console.clear()
             # Reset conversation
             self.conversation_history = []
             # Show fresh banner
-            self.show_banner()
+            self._reload_skin_ui()
             print("  ✨ (◕‿◕)✨ Fresh start! Screen cleared and conversation reset.\n")
         elif cmd_lower == "/history":
             self.show_history()

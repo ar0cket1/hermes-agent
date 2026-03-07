@@ -23,9 +23,10 @@ from typing import Iterable
 DEFAULT_SKIN = "hermes"
 VALID_SKINS = {"hermes", "ares", "posideon"}
 MOD_SKINS = {"ares", "posideon"}
+MOD_PAYLOAD_ROOT = Path(__file__).resolve().parent / "skin_payloads"
 MOD_DIRS = {
-    "ares": Path(__file__).resolve().parent.parent / "ares agent mod",
-    "posideon": Path(__file__).resolve().parent.parent / "posideon agent mod",
+    "ares": MOD_PAYLOAD_ROOT / "ares_agent_mod",
+    "posideon": MOD_PAYLOAD_ROOT / "posideon_agent_mod",
 }
 
 _DEFAULT_ARES_CRIMSON = "#9F1C1C"

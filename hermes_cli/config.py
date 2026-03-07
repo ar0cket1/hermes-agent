@@ -135,7 +135,7 @@ DEFAULT_CONFIG = {
     "command_allowlist": [],
     
     # Config schema version - bump this when adding new required fields
-    "_config_version": 3,
+    "_config_version": 4,
 }
 
 # =============================================================================

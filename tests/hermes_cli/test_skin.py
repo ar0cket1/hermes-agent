@@ -146,6 +146,19 @@ class TestCliSkinSwitching:
 
         assert events == [("set", "posideon", True), ("reload",)]
 
+    def test_clear_command_uses_safe_reload_ui_path(self):
+        cli = HermesCLI.__new__(HermesCLI)
+        cli.agent = Mock()
+        cli.conversation_history = [{"role": "user", "content": "hi"}]
+        cli._reload_skin_ui = Mock()
+
+        with patch("builtins.print"):
+            assert cli.process_command("/clear") is True
+
+        cli.agent.flush_memories.assert_called_once_with([{"role": "user", "content": "hi"}])
+        cli._reload_skin_ui.assert_called_once_with()
+        assert cli.conversation_history == []
+
     def test_reload_skin_ui_uses_prompt_toolkit_safe_redraw_when_app_running(self):
         cli = HermesCLI.__new__(HermesCLI)
         cli._app = Mock(is_running=True)
