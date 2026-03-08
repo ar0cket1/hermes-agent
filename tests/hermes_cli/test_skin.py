@@ -34,10 +34,12 @@ class TestNormalizeSkinName:
         assert normalize_skin_name("winged") == "ares"
         assert normalize_skin_name("poseidon") == "posideon"
         assert normalize_skin_name("stone") == "sisyphus"
+        assert normalize_skin_name("zard") == "charizard"
         assert normalize_skin_name("classic") == "hermes"
         assert normalize_skin_name("ares") == "ares"
         assert normalize_skin_name("posideon") == "posideon"
         assert normalize_skin_name("sisyphus") == "sisyphus"
+        assert normalize_skin_name("charizard") == "charizard"
         assert normalize_skin_name("unknown-theme") == "hermes"
 
     def test_skin_request_resolution_accepts_title_case(self):
@@ -45,6 +47,7 @@ class TestNormalizeSkinName:
         assert resolve_skin_request("Ares") == "ares"
         assert resolve_skin_request("Posideon") == "posideon"
         assert resolve_skin_request("Sisyphus") == "sisyphus"
+        assert resolve_skin_request("Charizard") == "charizard"
         assert resolve_skin_request("Poseidon") == "posideon"
         assert resolve_skin_request("unknown-theme") is None
 
@@ -57,6 +60,7 @@ class TestNormalizeSkinName:
         assert not is_posideon_skin("ares")
         assert is_mod_skin("ares")
         assert is_mod_skin("posideon")
+        assert is_mod_skin("charizard")
         assert not is_mod_skin("hermes")
 
 
@@ -158,6 +162,24 @@ class TestTelemetryHelpers:
             assert "You are Sisyphus Agent" in system_prompt
             assert hero
             assert interval >= 0.12
+
+        set_active_skin_globals("hermes")
+
+    def test_charizard_payload_exposes_skin_system_prompt_and_hero(self):
+        with patch.dict("os.environ", {"HERMES_CLI_SKIN": "charizard"}):
+            set_active_skin_globals("charizard")
+            lore = HermesLoreState(sessions=3, clever_replies=1, published_skills=["ember"])
+            brand = get_mod_brand_name()
+            system_prompt = get_mod_system_prompt()
+            title = get_banner_title(lore)
+            telemetry = build_relay_telemetry(lore, phase=1, width=40, active=True)
+            hero = get_caduceus_frame(lore, width=28, height=16)
+
+            assert brand == "Charizard Agent"
+            assert "You are Charizard Agent" in system_prompt
+            assert "Charizard Agent" in title
+            assert "tail flame active" in telemetry
+            assert hero
 
         set_active_skin_globals("hermes")
 

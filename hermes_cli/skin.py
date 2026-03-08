@@ -21,13 +21,14 @@ from typing import Iterable
 
 
 DEFAULT_SKIN = "hermes"
-VALID_SKINS = {"hermes", "ares", "posideon", "sisyphus"}
-MOD_SKINS = {"ares", "posideon", "sisyphus"}
+VALID_SKINS = {"hermes", "ares", "posideon", "sisyphus", "charizard"}
+MOD_SKINS = {"ares", "posideon", "sisyphus", "charizard"}
 MOD_PAYLOAD_ROOT = Path(__file__).resolve().parent / "skin_payloads"
 MOD_DIRS = {
     "ares": MOD_PAYLOAD_ROOT / "ares_agent_mod",
     "posideon": MOD_PAYLOAD_ROOT / "posideon_agent_mod",
     "sisyphus": MOD_PAYLOAD_ROOT / "sisyphus_agent_mod",
+    "charizard": MOD_PAYLOAD_ROOT / "charizard_agent_mod",
 }
 
 _DEFAULT_ARES_CRIMSON = "#9F1C1C"
@@ -169,6 +170,10 @@ def _normalize_skin_token(name: str | None) -> str:
         "stone": "sisyphus",
         "boulder": "sisyphus",
         "uphill": "sisyphus",
+        "zard": "charizard",
+        "dragon": "charizard",
+        "blaze": "charizard",
+        "ember": "charizard",
     }
     return aliases.get(normalized, normalized)
 
@@ -385,7 +390,7 @@ def _is_near_white(red: int, green: int, blue: int) -> bool:
 def build_mod_masthead() -> str:
     """Render a readable pixel-font masthead for the active mod banner."""
     payload = _call_mod("build_masthead")
-    if payload:
+    if payload and not bool(_mod_attr("FORCE_PIXEL_MASTHEAD", False)):
         return payload
     payload = _call_mod("build_ares_masthead")
     if payload:
@@ -409,12 +414,24 @@ def build_mod_masthead() -> str:
         "#775735",
     )
     text = get_mod_brand_name().upper().replace(" ", "-")
+    second_word_shift_rows = tuple(_mod_attr("PIXEL_MASTHEAD_SECOND_WORD_SHIFT_ROWS", ()))
+    second_word_shift = int(_mod_attr("PIXEL_MASTHEAD_SECOND_WORD_SHIFT", 0) or 0)
+    second_word_start = text.index("-") + 1 if "-" in text else len(text)
     lines: list[str] = []
 
     for row_index in range(7):
         line: list[str] = []
         active_color: str | None = None
         for char_index, char in enumerate(text):
+            if (
+                second_word_shift > 0
+                and row_index in second_word_shift_rows
+                and char_index == second_word_start
+            ):
+                if active_color is not None:
+                    line.append("[/]")
+                    active_color = None
+                line.append(" " * second_word_shift)
             glyph = PIXEL_FONT.get(char, PIXEL_FONT[" "])[row_index]
             if char == " ":
                 if active_color is not None:
@@ -612,6 +629,8 @@ def get_mod_next_labels() -> tuple[str, str]:
 
 def set_active_skin_globals(skin_name: str | None = None) -> str:
     """Refresh cached palette and animation globals after a runtime skin switch."""
+    # Force a payload reload so runtime /skin switches always reflect on-disk mod edits.
+    _load_mod.cache_clear()
     resolved_skin = _active_mod_skin(skin_name)
 
     global ARES_CRIMSON, ARES_BLOOD, ARES_EMBER, ARES_BRONZE, ARES_SAND
@@ -678,6 +697,11 @@ def is_ares_skin(name: str | None) -> bool:
 def is_posideon_skin(name: str | None) -> bool:
     """Return True when the Posideon visual skin is active."""
     return normalize_skin_name(name) == "posideon"
+
+
+def is_charizard_skin(name: str | None) -> bool:
+    """Return True when the Charizard visual skin is active."""
+    return normalize_skin_name(name) == "charizard"
 
 
 def is_mod_skin(name: str | None) -> bool:

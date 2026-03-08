@@ -856,7 +856,7 @@ class HermesCLI:
             max_turns: Maximum tool-calling iterations (default: 60)
             verbose: Enable verbose logging
             compact: Use compact display mode
-            skin: Visual skin name ("hermes", "ares", "posideon", or "sisyphus")
+            skin: Visual skin name ("hermes", "ares", "posideon", "sisyphus", or "charizard")
             resume: Session ID to resume (restores conversation history from SQLite)
         """
         # Initialize Rich console
@@ -2213,8 +2213,8 @@ class HermesCLI:
             parts = cmd_original.split(maxsplit=1)
             if len(parts) == 1:
                 print(f"Active skin: {self.skin}")
-                print("  Usage: /skin Hermes|Ares|Posideon|Sisyphus")
-                print("  Example: /skin Sisyphus")
+                print("  Usage: /skin Hermes|Ares|Posideon|Sisyphus|Charizard")
+                print("  Example: /skin Charizard")
             else:
                 requested_skin = resolve_skin_request(parts[1])
                 if requested_skin not in VALID_SKINS:
@@ -3400,6 +3400,8 @@ def _resolve_invoked_skin(requested_skin: str | None) -> str | None:
         return "posideon"
     if invoked_as.startswith("sisyphus"):
         return "sisyphus"
+    if invoked_as.startswith("charizard") or invoked_as.startswith("zard"):
+        return "charizard"
     if invoked_as.startswith("ares"):
         return "ares"
     if invoked_as.startswith("hermes"):
@@ -3438,7 +3440,7 @@ def main(
         max_turns: Maximum tool-calling iterations (default: 60)
         verbose: Enable verbose logging
         compact: Use compact display mode
-        skin: Visual skin name ("hermes", "ares", "posideon", or "sisyphus")
+        skin: Visual skin name ("hermes", "ares", "posideon", "sisyphus", or "charizard")
         list_tools: List available tools and exit
         list_toolsets: List available toolsets and exit
         resume: Resume a previous session by its ID (e.g., 20260225_143052_a1b2c3)
