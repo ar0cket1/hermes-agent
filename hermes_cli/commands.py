@@ -21,6 +21,7 @@ COMMANDS = {
     "/provider": "Show available providers and current provider",
     "/prompt": "View/set custom system prompt",
     "/personality": "Set a predefined personality",
+    "/reasoning": "Show or change reasoning effort (low|medium|high|xhigh)",
     "/clear": "Clear screen and reset conversation (fresh start)",
     "/history": "Show conversation history",
     "/new": "Start a new conversation (reset history)",

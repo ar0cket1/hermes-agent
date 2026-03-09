@@ -2174,6 +2174,37 @@ class HermesCLI:
             print("  Usage: /personality <name>")
             print()
     
+    def _handle_reasoning_command(self, cmd: str):
+        """Handle the /reasoning command to view or set reasoning effort."""
+        parts = cmd.split(maxsplit=1)
+        valid_efforts = ("low", "medium", "high", "xhigh", "minimal", "none")
+
+        if len(parts) == 1:
+            if self.reasoning_config is None:
+                current = "default (provider default)"
+            elif self.reasoning_config.get("enabled") is False:
+                current = "none"
+            else:
+                current = self.reasoning_config.get("effort", "medium")
+
+            print(f"Current reasoning effort: {current}")
+            print("  Usage: /reasoning <low|medium|high|xhigh>")
+            return
+
+        effort = parts[1].strip().lower()
+        if effort not in valid_efforts:
+            print(f"(._.) Invalid reasoning level: {effort}")
+            print("  Valid levels: low, medium, high, xhigh")
+            return
+
+        self.reasoning_config = _parse_reasoning_config(effort)
+        self.agent = None  # Force re-init with new reasoning config
+
+        if save_config_value("agent.reasoning_effort", effort):
+            print(f"(^_^)b Reasoning effort set to: {effort} (saved to config)")
+        else:
+            print(f"(^_^) Reasoning effort set to: {effort} (session only)")
+
     def _handle_cron_command(self, cmd: str):
         """Handle the /cron command to manage scheduled tasks."""
         parts = cmd.split(maxsplit=2)
@@ -2638,6 +2669,8 @@ class HermesCLI:
         elif cmd_lower.startswith("/personality"):
             # Use original case (handler lowercases the personality name itself)
             self._handle_personality_command(cmd_original)
+        elif cmd_lower.startswith("/reasoning"):
+            self._handle_reasoning_command(cmd_original)
         elif cmd_lower == "/retry":
             retry_msg = self.retry_last()
             if retry_msg and hasattr(self, '_pending_input'):
