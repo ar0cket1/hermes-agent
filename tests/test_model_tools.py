@@ -88,11 +88,18 @@ class TestBackwardCompat:
         # Should contain well-known tools
         assert "web_search" in names
         assert "terminal" in names
+        assert "research_state" in names
+        assert "research_loop" in names
+        assert "research_manager" in names
+        assert "tinker_posttrain" in names
 
     def test_get_toolset_for_tool(self):
         result = get_toolset_for_tool("web_search")
         assert result is not None
         assert isinstance(result, str)
+
+    def test_get_toolset_for_research_tool(self):
+        assert get_toolset_for_tool("research_state") == "research"
 
     def test_get_toolset_for_unknown_tool(self):
         result = get_toolset_for_tool("totally_nonexistent_tool")

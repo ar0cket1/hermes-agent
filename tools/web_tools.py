@@ -46,7 +46,11 @@ import os
 import re
 import asyncio
 from typing import List, Dict, Any, Optional
-from firecrawl import Firecrawl
+
+try:
+    from firecrawl import Firecrawl
+except ImportError:
+    Firecrawl = None
 from openai import AsyncOpenAI
 from agent.auxiliary_client import get_async_text_auxiliary_client
 from tools.debug_helpers import DebugSession
@@ -65,6 +69,11 @@ def _get_firecrawl_client():
     """
     global _firecrawl_client
     if _firecrawl_client is None:
+        if Firecrawl is None:
+            raise ValueError(
+                "Firecrawl dependency is not installed. Install the optional web tooling "
+                "dependencies to enable web_search, web_extract, and web_crawl."
+            )
         api_key = os.getenv("FIRECRAWL_API_KEY")
         api_url = os.getenv("FIRECRAWL_API_URL")
         if not api_key and not api_url:

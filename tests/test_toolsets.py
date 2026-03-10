@@ -60,6 +60,19 @@ class TestResolveToolset:
         tools = resolve_toolset("*")
         assert len(tools) > 10
 
+    def test_research_toolset(self):
+        tools = resolve_toolset("research")
+        assert "research_state" in tools
+        assert "research_loop" in tools
+        assert "research_manager" in tools
+        assert "tinker_posttrain" in tools
+        assert "literature" in tools
+        assert "dataset" in tools
+        assert "judge" in tools
+        assert "evaluation" in tools
+        assert "web_search" in tools
+        assert "terminal" in tools
+
 
 class TestResolveMultipleToolsets:
     def test_combines_and_deduplicates(self):
@@ -78,6 +91,7 @@ class TestValidateToolset:
     def test_valid(self):
         assert validate_toolset("web") is True
         assert validate_toolset("terminal") is True
+        assert validate_toolset("research") is True
 
     def test_all_alias_valid(self):
         assert validate_toolset("all") is True
