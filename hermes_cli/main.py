@@ -44,6 +44,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -3233,12 +3234,12 @@ For more help on a command:
         "setup",
         help="Interactive setup wizard",
         description="Configure Hermes Agent with an interactive wizard. "
-                    "Run a specific section: hermes setup model|terminal|gateway|tools|agent"
+                    "Run a specific section: hermes setup model|terminal|gateway|tools|agent|online-rl"
     )
     setup_parser.add_argument(
         "section",
         nargs="?",
-        choices=["model", "terminal", "gateway", "tools", "agent"],
+        choices=["model", "terminal", "gateway", "tools", "agent", "online-rl"],
         default=None,
         help="Run a specific setup section instead of the full wizard"
     )
@@ -3460,6 +3461,124 @@ For more help on a command:
     config_migrate = config_subparsers.add_parser("migrate", help="Update config with new options")
     
     config_parser.set_defaults(func=cmd_config)
+
+    # =========================================================================
+    # online-rl command
+    # =========================================================================
+    online_rl_parser = subparsers.add_parser(
+        "online-rl",
+        help="Manage online RL feedback, training batches, and active adapters",
+        description="Inspect feedback queues, export batches, and run the built-in MIS-PO LoRA trainer",
+    )
+    online_rl_subparsers = online_rl_parser.add_subparsers(dest="online_rl_action")
+
+    online_rl_subparsers.add_parser("status", help="Show online-RL config and active adapter state")
+    online_rl_subparsers.add_parser("setup", help="Interactive setup wizard for online RL")
+
+    online_rl_list = online_rl_subparsers.add_parser("list-feedback", help="List stored online-RL feedback rows")
+    online_rl_list.add_argument("--limit", type=int, default=20, help="Max rows to show (default: 20)")
+    online_rl_list.add_argument("--pending", action="store_true", help="Only show pending rows")
+    online_rl_list.add_argument("--all", action="store_true", help="Include neutral no_rl rows")
+    online_rl_list.add_argument("--session-id", help="Filter by session id")
+
+    online_rl_export = online_rl_subparsers.add_parser("export-feedback", help="Export feedback rows to JSONL")
+    online_rl_export.add_argument("output", help="Output JSONL path")
+    online_rl_export.add_argument("--pending", action="store_true", help="Only export pending rows")
+    online_rl_export.add_argument("--all", action="store_true", help="Include neutral no_rl rows")
+    online_rl_export.add_argument("--limit", type=int, default=1000, help="Max rows to export")
+
+    online_rl_train = online_rl_subparsers.add_parser("train-batch", help="Run the built-in MIS-PO LoRA trainer")
+    online_rl_train.add_argument("--export-path", default=os.getenv("HERMES_RL_EXPORT_PATH", ""), help="JSONL feedback batch path")
+    online_rl_train.add_argument("--runtime-base-url", default=os.getenv("HERMES_RL_RUNTIME_BASE_URL", ""), help="Local inference base URL")
+    online_rl_train.add_argument("--feedback-ids", default=os.getenv("HERMES_RL_FEEDBACK_IDS", ""), help="Comma-separated feedback ids to train")
+
+    def cmd_online_rl(args):
+        from hermes_state import SessionDB
+        from agent.online_rl import load_online_rl_config, load_online_rl_state
+        from agent.online_rl_trainer import run_train_batch
+
+        action = args.online_rl_action or "status"
+
+        if action == "setup":
+            from hermes_cli.config import load_config, save_config
+            from hermes_cli.setup import setup_online_rl
+            config = load_config()
+            setup_online_rl(config)
+            save_config(config)
+            return
+
+        cfg = load_online_rl_config()
+
+        if action == "status":
+            state = load_online_rl_state(cfg)
+            runtime_base_url = cfg.get("model_base_url") or ""
+            print(f"enabled:            {cfg.get('enabled')}")
+            print(f"prompt_after_response: {cfg.get('prompt_after_response')}")
+            print(f"algorithm:          {cfg.get('algorithm')}")
+            print(f"backend:            {cfg.get('backend')}")
+            print(f"runtime_base_url:   {runtime_base_url}")
+            print(f"training_base_model:{cfg.get('training_base_model')}")
+            print(f"adapter_name:       {cfg.get('adapter_name')}")
+            print(f"active_backend:     {state.get('backend', '')}")
+            print(f"active_model_name:  {state.get('active_model_name', '')}")
+            print(f"active_adapter_path:{state.get('active_adapter_path', '')}")
+            return
+
+        if action in {"list-feedback", "export-feedback"}:
+            db = SessionDB()
+            try:
+                if action == "list-feedback":
+                    rows = db.list_rl_feedback(
+                        limit=max(1, int(args.limit)),
+                        pending_only=bool(args.pending),
+                        include_neutral=bool(args.all),
+                        session_id=getattr(args, "session_id", None),
+                    )
+                    if not rows:
+                        print("No online-RL feedback rows found.")
+                        return
+                    for row in rows:
+                        preview = str(row.get("message_content") or "").strip().replace("\n", " ")
+                        preview = preview[:72] + ("..." if len(preview) > 72 else "")
+                        print(
+                            f"{row['id']:>5}  {row['label']:<10}  {row['trainer_status']:<10}  "
+                            f"{row['session_id']}  {preview}"
+                        )
+                    return
+
+                exported = db.export_rl_feedback_jsonl(
+                    Path(args.output).expanduser(),
+                    pending_only=bool(args.pending),
+                    include_neutral=bool(args.all),
+                    limit=max(1, int(args.limit)),
+                )
+                print(f"Exported {len(exported)} feedback rows to {args.output}")
+                return
+            finally:
+                db.close()
+
+        if action == "train-batch":
+            export_path = str(args.export_path or "").strip()
+            if not export_path:
+                print("Error: --export-path is required")
+                sys.exit(1)
+            feedback_ids = [
+                int(part)
+                for part in str(args.feedback_ids or "").split(",")
+                if part.strip()
+            ]
+            result = run_train_batch(
+                export_path,
+                runtime_base_url=str(args.runtime_base_url or "").strip() or None,
+                feedback_ids=feedback_ids or None,
+                cfg=cfg,
+            )
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return
+
+        online_rl_parser.print_help()
+
+    online_rl_parser.set_defaults(func=cmd_online_rl)
     
     # =========================================================================
     # pairing command

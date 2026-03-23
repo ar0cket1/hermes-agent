@@ -249,6 +249,45 @@ def load_cli_config() -> Dict[str, Any]:
             "base_url": "",    # Direct OpenAI-compatible endpoint for subagents
             "api_key": "",     # API key for delegation.base_url (falls back to OPENAI_API_KEY)
         },
+        "online_rl": {
+            "enabled": False,
+            "prompt_after_response": False,
+            "local_only": True,
+            "backend": "auto",
+            "algorithm": "mis_po",
+            "min_batch_size": 8,
+            "max_batch_size": 64,
+            "feedback_timeout_seconds": 45,
+            "export_dir": "~/.hermes/online_rl/exports",
+            "adapter_output_dir": "~/.hermes/online_rl/adapters",
+            "state_path": "~/.hermes/online_rl/state.json",
+            "trainer_command": "",
+            "builtin_trainer": True,
+            "training_base_model": "",
+            "adapter_name": "hermes-online-rl",
+            "ollama_model_name": "",
+            "ollama_command": "ollama",
+            "train_steps": 16,
+            "micro_batch_size": 1,
+            "gradient_accumulation_steps": 4,
+            "learning_rate": 2e-6,
+            "weight_decay": 0.1,
+            "warmup_steps": 20,
+            "kl_coefficient": 0.001,
+            "token_ratio_min": 0.5,
+            "token_ratio_max": 2.0,
+            "trajectory_ratio_min": 0.996,
+            "trajectory_ratio_max": 1.001,
+            "max_sequence_length": 4096,
+            "lora_rank": 16,
+            "lora_alpha": 32,
+            "lora_dropout": 0.05,
+            "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            "device": "auto",
+            "torch_dtype": "auto",
+            "trust_remote_code": False,
+            "max_saved_adapters": 4,
+        },
     }
     
     # Track whether the config file explicitly set terminal config.
@@ -1216,6 +1255,9 @@ class HermesCLI:
         self._clarify_state = None
         self._clarify_freetext = False
         self._clarify_deadline = 0
+        self._rl_feedback_state = None
+        self._rl_feedback_deadline = 0
+        self._active_online_rl_adapter_path = None
         self._sudo_state = None
         self._sudo_deadline = 0
         self._approval_state = None
@@ -1404,8 +1446,18 @@ class HermesCLI:
                 ("class:status-bar-dim", " "),
                 (bar_style, percent_label),
             ]
+            # Online RL indicator
+            try:
+                from agent.online_rl import online_rl_enabled_for_runtime
+                runtime_url = getattr(self, "base_url", None)
+                if online_rl_enabled_for_runtime(runtime_base_url=runtime_url):
+                    frags.append(("class:status-bar-dim", " \u2502 "))
+                    frags.append(("class:status-bar-rl", "RL"))
+            except Exception:
+                pass
+
             frags.extend([
-                ("class:status-bar-dim", " │ "),
+                ("class:status-bar-dim", " \u2502 "),
                 ("class:status-bar-dim", duration_label),
                 ("class:status-bar", " "),
             ])
@@ -1806,6 +1858,7 @@ class HermesCLI:
         if (credentials_changed or routing_changed or model_changed) and self.agent is not None:
             self.agent = None
             self._active_agent_route_signature = None
+            self._active_online_rl_adapter_path = None
 
         return True
 
@@ -1835,11 +1888,44 @@ class HermesCLI:
         Returns:
             bool: True if successful, False otherwise
         """
-        if self.agent is not None:
-            return True
-
         if not self._ensure_runtime_credentials():
             return False
+
+        runtime = runtime_override or {
+            "api_key": self.api_key,
+            "base_url": self.base_url,
+            "provider": self.provider,
+            "api_mode": self.api_mode,
+            "command": self.acp_command,
+            "args": list(self.acp_args or []),
+        }
+        effective_model = model_override or self.model
+        desired_model = effective_model
+        desired_adapter_path = None
+        try:
+            from agent.online_rl import (
+                load_online_rl_config,
+                load_online_rl_state,
+                online_rl_enabled_for_runtime,
+            )
+
+            cfg = load_online_rl_config()
+            runtime_base_url = str(runtime.get("base_url") or "")
+            if online_rl_enabled_for_runtime(runtime_base_url=runtime_base_url, cfg=cfg):
+                state = load_online_rl_state(cfg)
+                active_model_name = str(state.get("active_model_name") or "").strip()
+                active_adapter_path = str(state.get("active_adapter_path") or "").strip()
+                if active_model_name:
+                    desired_model = active_model_name
+                    desired_adapter_path = active_adapter_path or None
+        except Exception:
+            pass
+
+        if self.agent is not None:
+            if self.agent.model == desired_model and self._active_online_rl_adapter_path == desired_adapter_path:
+                return True
+            self.agent = None
+            self._active_agent_route_signature = None
 
         # Initialize SQLite session store for CLI sessions (if not already done in __init__)
         if self._session_db is None:
@@ -1887,15 +1973,18 @@ class HermesCLI:
                 pass
         
         try:
-            runtime = runtime_override or {
-                "api_key": self.api_key,
-                "base_url": self.base_url,
-                "provider": self.provider,
-                "api_mode": self.api_mode,
-                "command": self.acp_command,
-                "args": list(self.acp_args or []),
-            }
-            effective_model = model_override or self.model
+            try:
+                from agent.online_rl import resolve_online_rl_model
+
+                rl_runtime = resolve_online_rl_model(
+                    effective_model,
+                    runtime_base_url=str(runtime.get("base_url") or ""),
+                )
+                effective_model = str(rl_runtime.get("model") or effective_model)
+                active_adapter_path = str((rl_runtime.get("state") or {}).get("active_adapter_path") or "").strip()
+                self._active_online_rl_adapter_path = active_adapter_path or None
+            except Exception:
+                self._active_online_rl_adapter_path = None
             self.agent = AIAgent(
                 model=effective_model,
                 api_key=runtime.get("api_key"),
@@ -3916,8 +4005,20 @@ class HermesCLI:
 
         def run_background():
             try:
+                effective_model = turn_route["model"]
+                try:
+                    from agent.online_rl import resolve_online_rl_model
+
+                    rl_runtime = resolve_online_rl_model(
+                        effective_model,
+                        runtime_base_url=str(turn_route["runtime"].get("base_url") or ""),
+                    )
+                    effective_model = str(rl_runtime.get("model") or effective_model)
+                except Exception:
+                    pass
+
                 bg_agent = AIAgent(
-                    model=turn_route["model"],
+                    model=effective_model,
                     api_key=turn_route["runtime"].get("api_key"),
                     base_url=turn_route["runtime"].get("base_url"),
                     provider=turn_route["runtime"].get("provider"),
@@ -5352,6 +5453,162 @@ class HermesCLI:
             except Exception:
                 pass
 
+    def _online_rl_feedback_target(self) -> Optional[Dict[str, Any]]:
+        """Resolve the last persisted assistant turn that should receive feedback."""
+        if not self._session_db:
+            return None
+        effective_session_id = getattr(self.agent, "session_id", None) or self.session_id
+        last_assistant = self._session_db.get_last_assistant_message(effective_session_id)
+        if not last_assistant:
+            return None
+        return {
+            "session_id": effective_session_id,
+            "message_id": int(last_assistant["id"]),
+            "message": last_assistant,
+        }
+
+    def _should_prompt_online_rl_feedback(self) -> bool:
+        """Return True when the post-response RL selector should appear."""
+        if not self._app or not self.agent or not self._session_db:
+            return False
+        try:
+            from agent.online_rl import (
+                load_online_rl_config,
+                prompt_for_feedback_enabled,
+            )
+
+            cfg = load_online_rl_config()
+            runtime_base_url = getattr(self.agent, "base_url", None) or self.base_url
+            return prompt_for_feedback_enabled(
+                runtime_base_url=runtime_base_url,
+                cfg=cfg,
+            )
+        except Exception:
+            return False
+
+    def _handle_rl_feedback_selection(self) -> None:
+        """Process the currently highlighted online-RL feedback choice."""
+        state = self._rl_feedback_state
+        if not state:
+            return
+        choices = state.get("choices") or []
+        selected = state.get("selected", 0)
+        if not (0 <= selected < len(choices)):
+            return
+        state["response_queue"].put(choices[selected]["label"])
+        self._rl_feedback_state = None
+        self._rl_feedback_deadline = 0
+        self._clear_current_input()
+        self._invalidate(min_interval=0.0)
+
+    def _submit_online_rl_feedback(
+        self,
+        *,
+        session_id: str,
+        message_id: int,
+        label: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Persist the selected label and maybe queue a local trainer batch."""
+        if not self._session_db or not self.agent:
+            return None
+        try:
+            from agent.online_rl import submit_online_rl_feedback
+
+            feedback, queued = submit_online_rl_feedback(
+                self._session_db,
+                session_id=session_id,
+                message_id=message_id,
+                label=label,
+                source="cli",
+                metadata={
+                    "interactive": True,
+                    "session_id": session_id,
+                },
+                runtime_base_url=getattr(self.agent, "base_url", None) or self.base_url,
+            )
+        except Exception as e:
+            _cprint(f"{_DIM}Online RL feedback save failed: {e}{_RST}")
+            return None
+
+        label_display = {
+            "upweight": "RL upweight",
+            "downweight": "RL downweight",
+            "no_rl": "No RL",
+        }.get(feedback.get("label"), feedback.get("label", "saved"))
+        _cprint(f"{_DIM}Saved feedback: {label_display}{_RST}")
+        if queued:
+            _cprint(
+                f"{_DIM}Queued local trainer batch ({queued.get('batch_size')} samples) "
+                f"at {queued.get('export_path')}{_RST}"
+            )
+        return {
+            "feedback": feedback,
+            "queued": queued,
+        }
+
+    def _prompt_for_online_rl_feedback(self, response_text: str) -> Optional[Dict[str, Any]]:
+        """Show the inline RL selector after a response and persist the chosen label."""
+        if not self._should_prompt_online_rl_feedback():
+            return None
+
+        target = self._online_rl_feedback_target()
+        if not target:
+            return None
+
+        try:
+            from agent.online_rl import feedback_choice_metadata, load_online_rl_config
+        except Exception:
+            return None
+
+        existing = self._session_db.get_rl_feedback(message_id=target["message_id"])
+        choices = feedback_choice_metadata()
+        default_label = (existing or {}).get("label") or "no_rl"
+        selected = 0
+        for idx, choice in enumerate(choices):
+            if choice["label"] == default_label:
+                selected = idx
+                break
+
+        cfg = load_online_rl_config()
+        timeout = max(5, int(cfg.get("feedback_timeout_seconds", 45)))
+        response_queue = queue.Queue()
+        self._rl_feedback_state = {
+            "session_id": target["session_id"],
+            "message_id": target["message_id"],
+            "choices": choices,
+            "selected": selected,
+            "response_queue": response_queue,
+            "response_preview": (response_text or "")[:240].strip(),
+        }
+        self._rl_feedback_deadline = time.monotonic() + timeout
+        self._invalidate(min_interval=0.0)
+
+        last_countdown_refresh = time.monotonic()
+        while True:
+            try:
+                label = response_queue.get(timeout=1)
+                self._rl_feedback_deadline = 0
+                return self._submit_online_rl_feedback(
+                    session_id=target["session_id"],
+                    message_id=target["message_id"],
+                    label=label,
+                )
+            except queue.Empty:
+                remaining = self._rl_feedback_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                now = time.monotonic()
+                if now - last_countdown_refresh >= 5.0:
+                    last_countdown_refresh = now
+                    self._invalidate(min_interval=0.0)
+
+        self._rl_feedback_state = None
+        self._rl_feedback_deadline = 0
+        self._clear_current_input()
+        self._invalidate(min_interval=0.0)
+        _cprint(f"{_DIM}Online RL feedback prompt timed out; skipped.{_RST}")
+        return None
+
 
     def chat(self, message, images: list = None) -> Optional[str]:
         """
@@ -5679,6 +5936,17 @@ class HermesCLI:
                         padding=(1, 2),
                     ))
 
+            if (
+                response
+                and not pending_message
+                and result
+                and not result.get("failed")
+                and not result.get("partial")
+            ):
+                try:
+                    self._prompt_for_online_rl_feedback(response)
+                except Exception as e:
+                    _cprint(f"{_DIM}Online RL feedback prompt failed: {e}{_RST}")
 
             # Play terminal bell when agent finishes (if enabled).
             # Works over SSH — the bell propagates to the user's terminal.
@@ -5809,6 +6077,8 @@ class HermesCLI:
             return [("class:voice-recording", f"● {bar} {state_suffix}")]
         if self._voice_processing:
             return [("class:voice-processing", f"◉ {state_suffix}")]
+        if self._rl_feedback_state:
+            return [("class:rl-feedback-selected", f"⇅ {state_suffix}")]
         if self._sudo_state:
             return [("class:sudo-prompt", f"🔐 {state_suffix}")]
         if self._secret_state:
@@ -5880,6 +6150,7 @@ class HermesCLI:
         *,
         sudo_widget,
         secret_widget,
+        rl_feedback_widget,
         approval_widget,
         clarify_widget,
         spinner_widget,
@@ -5902,6 +6173,7 @@ class HermesCLI:
             Window(height=0),
             sudo_widget,
             secret_widget,
+            rl_feedback_widget,
             approval_widget,
             clarify_widget,
             spinner_widget,
@@ -5970,6 +6242,8 @@ class HermesCLI:
         self._clarify_state = None      # dict with question, choices, selected, response_queue
         self._clarify_freetext = False  # True when user chose "Other" and is typing
         self._clarify_deadline = 0      # monotonic timestamp when the clarify times out
+        self._rl_feedback_state = None  # dict with session/message target, choices, selected, response_queue
+        self._rl_feedback_deadline = 0
 
         # Sudo password prompt state (similar mechanism to clarify)
         self._sudo_state = None         # dict with response_queue when active
@@ -6045,6 +6319,13 @@ class HermesCLI:
             if self._secret_state:
                 text = event.app.current_buffer.text
                 self._submit_secret_response(text)
+                event.app.current_buffer.reset()
+                event.app.invalidate()
+                return
+
+            # --- Online RL prompt: confirm the highlighted feedback choice ---
+            if self._rl_feedback_state:
+                self._handle_rl_feedback_selection()
                 event.app.current_buffer.reset()
                 event.app.invalidate()
                 return
@@ -6186,12 +6467,54 @@ class HermesCLI:
                 self._approval_state["selected"] = min(max_idx, self._approval_state["selected"] + 1)
                 event.app.invalidate()
 
+        # --- Online RL feedback: arrow-key navigation ---
+
+        @kb.add('up', filter=Condition(lambda: bool(self._rl_feedback_state)))
+        def rl_feedback_up(event):
+            if self._rl_feedback_state:
+                self._rl_feedback_state["selected"] = max(0, self._rl_feedback_state["selected"] - 1)
+                event.app.invalidate()
+
+        @kb.add('down', filter=Condition(lambda: bool(self._rl_feedback_state)))
+        def rl_feedback_down(event):
+            if self._rl_feedback_state:
+                max_idx = len(self._rl_feedback_state["choices"]) - 1
+                self._rl_feedback_state["selected"] = min(max_idx, self._rl_feedback_state["selected"] + 1)
+                event.app.invalidate()
+
+        # --- Online RL feedback: number-key quick-select ---
+        _rl_fb_filter = Condition(lambda: bool(self._rl_feedback_state))
+
+        @kb.add('1', filter=_rl_fb_filter)
+        def rl_feedback_1(event):
+            if self._rl_feedback_state and len(self._rl_feedback_state["choices"]) > 0:
+                self._rl_feedback_state["selected"] = 0
+                self._handle_rl_feedback_selection()
+
+        @kb.add('2', filter=_rl_fb_filter)
+        def rl_feedback_2(event):
+            if self._rl_feedback_state and len(self._rl_feedback_state["choices"]) > 1:
+                self._rl_feedback_state["selected"] = 1
+                self._handle_rl_feedback_selection()
+
+        @kb.add('3', filter=_rl_fb_filter)
+        def rl_feedback_3(event):
+            if self._rl_feedback_state and len(self._rl_feedback_state["choices"]) > 2:
+                self._rl_feedback_state["selected"] = 2
+                self._handle_rl_feedback_selection()
+
         # --- History navigation: up/down browse history in normal input mode ---
         # The TextArea is multiline, so by default up/down only move the cursor.
         # Buffer.auto_up/auto_down handle both: cursor movement when multi-line,
         # history browsing when on the first/last line (or single-line input).
         _normal_input = Condition(
-            lambda: not self._clarify_state and not self._approval_state and not self._sudo_state and not self._secret_state
+            lambda: (
+                not self._clarify_state
+                and not self._approval_state
+                and not self._sudo_state
+                and not self._secret_state
+                and not self._rl_feedback_state
+            )
         )
 
         @kb.add('up', filter=_normal_input)
@@ -6247,6 +6570,15 @@ class HermesCLI:
             # Cancel secret prompt
             if self._secret_state:
                 self._cancel_secret_capture()
+                event.app.current_buffer.reset()
+                event.app.invalidate()
+                return
+
+            # Cancel online RL prompt (skip feedback)
+            if self._rl_feedback_state:
+                self._rl_feedback_state["response_queue"].put("no_rl")
+                self._rl_feedback_state = None
+                self._rl_feedback_deadline = 0
                 event.app.current_buffer.reset()
                 event.app.invalidate()
                 return
@@ -6458,7 +6790,7 @@ class HermesCLI:
             style='class:input-area',
             multiline=True,
             wrap_lines=True,
-            read_only=Condition(lambda: bool(cli_ref._command_running)),
+            read_only=Condition(lambda: bool(cli_ref._command_running or cli_ref._rl_feedback_state)),
             history=FileHistory(str(self._history_file)),
             completer=_completer,
             complete_while_typing=True,
@@ -6545,6 +6877,8 @@ class HermesCLI:
                 return "recording... Ctrl+B to stop, Ctrl+C to cancel"
             if cli_ref._voice_processing:
                 return "transcribing..."
+            if cli_ref._rl_feedback_state:
+                return ""
             if cli_ref._sudo_state:
                 return "type password (hidden), Enter to skip"
             if cli_ref._secret_state:
@@ -6587,6 +6921,13 @@ class HermesCLI:
                     ('class:clarify-countdown', f'  ({remaining}s)'),
                 ]
 
+            if cli_ref._rl_feedback_state:
+                remaining = max(0, int(cli_ref._rl_feedback_deadline - _time.monotonic()))
+                return [
+                    ('class:hint', '  \u2191/\u2193 select \u00b7 Enter confirm \u00b7 1/2/3 quick-select \u00b7 Ctrl+C skip'),
+                    ('class:clarify-countdown', f'  ({remaining}s)'),
+                ]
+
             if cli_ref._approval_state:
                 remaining = max(0, int(cli_ref._approval_deadline - _time.monotonic()))
                 return [
@@ -6616,7 +6957,7 @@ class HermesCLI:
             return []
 
         def get_hint_height():
-            if cli_ref._sudo_state or cli_ref._secret_state or cli_ref._approval_state or cli_ref._clarify_state or cli_ref._command_running:
+            if cli_ref._sudo_state or cli_ref._secret_state or cli_ref._rl_feedback_state or cli_ref._approval_state or cli_ref._clarify_state or cli_ref._command_running:
                 return 1
             # Keep a 1-line spacer while agent runs so output doesn't push
             # right up against the top rule of the input area
@@ -6742,6 +7083,84 @@ class HermesCLI:
                 wrap_lines=True,
             ),
             filter=Condition(lambda: cli_ref._clarify_state is not None),
+        )
+
+        def _get_rl_feedback_display():
+            import time as _time
+            state = cli_ref._rl_feedback_state
+            if not state:
+                return []
+
+            title = "Online RL"
+            choices = state.get("choices") or []
+            selected = state.get("selected", 0)
+
+            # Countdown timer
+            remaining = max(0, int(cli_ref._rl_feedback_deadline - _time.monotonic()))
+            timer_str = f"{remaining}s"
+
+            # Choice icons and descriptions
+            _choice_meta = {
+                "upweight": {"icon": "\u2b06", "hint": "learn from this", "key": "1"},
+                "downweight": {"icon": "\u2b07", "hint": "unlearn this", "key": "2"},
+                "no_rl": {"icon": "\u2298", "hint": "no training", "key": "3"},
+            }
+
+            # Build choice lines for width calculation
+            choice_texts = []
+            for i, choice in enumerate(choices):
+                label_key = choice.get("label", "")
+                meta = _choice_meta.get(label_key, {"icon": " ", "hint": "", "key": str(i + 1)})
+                prefix = "\u276f " if i == selected else "  "
+                choice_title = choice.get("title", label_key)
+                choice_texts.append(f"{prefix}{meta['icon']} {choice_title}   {meta['hint']}  [{meta['key']}]")
+
+            hint_line = "\u25b2/\u25bc navigate  Enter confirm  1/2/3 quick-select"
+            all_lines = [hint_line] + choice_texts
+            box_width = _panel_box_width(title, all_lines, min_width=38, max_width=60)
+            inner_text_width = max(8, box_width - 2)
+
+            # Title bar with countdown
+            title_text = f"{title} "
+            timer_width = len(timer_str) + 1
+            fill = max(0, box_width - len(title_text) - 3 - timer_width)
+            lines = []
+            lines.append(('class:rl-feedback-border', '\u256d\u2500 '))
+            lines.append(('class:rl-feedback-title', title_text))
+            lines.append(('class:rl-feedback-border', '\u2500' * fill + ' '))
+            lines.append(('class:rl-feedback-countdown', timer_str))
+            lines.append(('class:rl-feedback-border', ' \u256e\n'))
+
+            _append_blank_panel_line(lines, 'class:rl-feedback-border', box_width)
+
+            # Hotkey hints
+            for wrapped in _wrap_panel_text(hint_line, inner_text_width):
+                _append_panel_line(lines, 'class:rl-feedback-border', 'class:rl-feedback-hint', wrapped, box_width)
+
+            _append_blank_panel_line(lines, 'class:rl-feedback-border', box_width)
+
+            # Choices with icons and descriptions
+            for i, choice in enumerate(choices):
+                label_key = choice.get("label", "")
+                meta = _choice_meta.get(label_key, {"icon": " ", "hint": "", "key": str(i + 1)})
+                is_selected = i == selected
+                prefix = "\u276f " if is_selected else "  "
+                choice_title = choice.get("title", label_key)
+                display_text = f"{prefix}{meta['icon']} {choice_title}   {meta['hint']}  [{meta['key']}]"
+                style = 'class:rl-feedback-selected' if is_selected else 'class:rl-feedback-choice'
+                for wrapped in _wrap_panel_text(display_text, inner_text_width, subsequent_indent="    "):
+                    _append_panel_line(lines, 'class:rl-feedback-border', style, wrapped, box_width)
+
+            _append_blank_panel_line(lines, 'class:rl-feedback-border', box_width)
+            lines.append(('class:rl-feedback-border', '\u2570' + ('\u2500' * box_width) + '\u256f\n'))
+            return lines
+
+        rl_feedback_widget = ConditionalContainer(
+            Window(
+                FormattedTextControl(_get_rl_feedback_display),
+                wrap_lines=True,
+            ),
+            filter=Condition(lambda: cli_ref._rl_feedback_state is not None),
         )
 
         # --- Sudo password: display widget ---
@@ -6893,6 +7312,7 @@ class HermesCLI:
                 self._build_tui_layout_children(
                     sudo_widget=sudo_widget,
                     secret_widget=secret_widget,
+                    rl_feedback_widget=rl_feedback_widget,
                     approval_widget=approval_widget,
                     clarify_widget=clarify_widget,
                     spinner_widget=spinner_widget,
@@ -6922,6 +7342,7 @@ class HermesCLI:
             'status-bar-warn': 'bg:#1a1a2e #FFD700 bold',
             'status-bar-bad': 'bg:#1a1a2e #FF8C00 bold',
             'status-bar-critical': 'bg:#1a1a2e #FF6B6B bold',
+            'status-bar-rl': 'bg:#1a1a2e #8FBC8F bold',
             # Bronze horizontal rules around the input area
             'input-rule': '#CD7F32',
             # Clipboard image attachment badges
@@ -6944,6 +7365,14 @@ class HermesCLI:
             'sudo-border': '#CD7F32',
             'sudo-title': '#FF6B6B bold',
             'sudo-text': '#FFF8DC',
+            # Online RL feedback panel
+            'rl-feedback-border': '#CD7F32',
+            'rl-feedback-title': '#8FBC8F bold',
+            'rl-feedback-text': '#FFF8DC',
+            'rl-feedback-hint': '#888888 italic',
+            'rl-feedback-countdown': '#FF8C00 bold',
+            'rl-feedback-choice': '#AAAAAA',
+            'rl-feedback-selected': '#FFD700 bold',
             # Dangerous command approval panel
             'approval-border': '#CD7F32',
             'approval-title': '#FF8C00 bold',

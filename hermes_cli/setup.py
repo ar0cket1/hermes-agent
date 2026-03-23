@@ -3082,6 +3082,224 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
 
 
 # =============================================================================
+# Online RL Setup
+# =============================================================================
+
+
+def _detect_local_servers() -> list[dict]:
+    """Probe common local inference endpoints and return detected servers."""
+    import httpx
+
+    candidates = [
+        ("http://localhost:11434", "Ollama"),
+        ("http://localhost:8000", "vLLM / local"),
+        ("http://localhost:8080", "llama.cpp / local"),
+        ("http://localhost:1234", "LM Studio"),
+    ]
+    found = []
+    for url, label in candidates:
+        try:
+            with httpx.Client(timeout=2.0) as client:
+                r = client.get(f"{url}/v1/models")
+                if r.status_code == 200:
+                    data = r.json()
+                    models = data.get("data") or []
+                    model_ids = [m.get("id", "unknown") for m in models[:5]]
+                    found.append({"url": url, "label": label, "models": model_ids})
+        except Exception:
+            pass
+        # Also check Ollama-specific endpoint
+        if "11434" in url:
+            try:
+                with httpx.Client(timeout=2.0) as client:
+                    r = client.get(f"{url}/api/tags")
+                    if r.status_code == 200:
+                        data = r.json()
+                        if "models" in data and not any(s["url"] == url for s in found):
+                            model_ids = [m.get("name", "unknown") for m in (data.get("models") or [])[:5]]
+                            found.append({"url": url, "label": "Ollama", "models": model_ids})
+            except Exception:
+                pass
+    return found
+
+
+def setup_online_rl(config: dict):
+    """Interactive setup for online RL with LoRA adapters."""
+    rl_config = config.get("online_rl") or {}
+
+    print()
+    print_header("Online RL Setup")
+    print_info("Train a LoRA adapter from your feedback as you use Hermes.")
+    print_info("Requires a locally-hosted model (vLLM, Ollama, etc.)")
+    print()
+
+    # Check for required dependencies
+    _missing_deps = []
+    for _dep_name in ("torch", "transformers", "peft"):
+        if importlib.util.find_spec(_dep_name) is None:
+            _missing_deps.append(_dep_name)
+    if _missing_deps:
+        print_warning(f"Missing Python packages: {', '.join(_missing_deps)}")
+        print_info("  Install with: pip install 'hermes-agent[online-rl]'")
+        print_info("  Or: pip install torch transformers peft")
+        print()
+        if not prompt_yes_no("Continue setup anyway? (you can install later)", True):
+            return
+
+    # Step 1: Detect local servers
+    print_info("Scanning for local inference servers...")
+    servers = _detect_local_servers()
+
+    if servers:
+        print_success(f"Found {len(servers)} local server(s):")
+        for s in servers:
+            models_str = ", ".join(s["models"][:3]) if s["models"] else "no models listed"
+            print_info(f"  {s['label']} at {s['url']} ({models_str})")
+        print()
+    else:
+        print_warning("No local inference servers detected.")
+        print_info("Online RL requires a local model server (vLLM, Ollama, llama.cpp, etc.)")
+        if not prompt_yes_no("Continue setup anyway? (you can start a server later)", False):
+            return
+        print()
+
+    # Step 2: Select server / base URL
+    current_base_url = rl_config.get("model_base_url") or ""
+    model_cfg = config.get("model")
+    if isinstance(model_cfg, dict):
+        current_base_url = current_base_url or model_cfg.get("base_url", "")
+
+    if servers:
+        choices = [f"{s['label']} — {s['url']}" for s in servers]
+        choices.append("Enter a custom URL")
+        if current_base_url:
+            choices.append(f"Keep current ({current_base_url})")
+
+        idx = prompt_choice("Which server should online RL use?", choices, 0)
+
+        if idx < len(servers):
+            base_url = servers[idx]["url"]
+        elif idx == len(servers):
+            base_url = prompt("Enter inference server URL", default=current_base_url or "http://localhost:8000")
+        else:
+            base_url = current_base_url
+    else:
+        base_url = prompt(
+            "Inference server base URL",
+            default=current_base_url or "http://localhost:8000",
+        )
+
+    # Step 3: Model name for training
+    current_model = rl_config.get("training_base_model") or ""
+    if not current_model and isinstance(model_cfg, dict):
+        current_model = model_cfg.get("default", "")
+
+    # Try to auto-detect from server
+    detected_models = []
+    for s in servers:
+        if s["url"] == base_url:
+            detected_models = s.get("models", [])
+            break
+
+    if detected_models:
+        print()
+        print_info("Models available on server:")
+        choices = list(detected_models[:8])
+        choices.append("Enter model name manually")
+        if current_model:
+            choices.append(f"Keep current ({current_model})")
+        idx = prompt_choice("Select the base model for LoRA training:", choices, 0)
+        if idx < len(detected_models[:8]):
+            training_model = detected_models[idx]
+        elif idx == len(detected_models[:8]):
+            training_model = prompt("Base model name/path", default=current_model)
+        else:
+            training_model = current_model
+    else:
+        training_model = prompt(
+            "Base model name or HuggingFace path (for tokenizer & LoRA)",
+            default=current_model,
+        )
+
+    # Step 4: Feedback prompt toggle
+    print()
+    current_prompt = rl_config.get("prompt_after_response", False)
+    show_feedback = prompt_yes_no(
+        "Show feedback buttons after each response? (upweight / downweight / skip)",
+        default=current_prompt if isinstance(current_prompt, bool) else True,
+    )
+
+    # Step 5: LoRA defaults
+    print()
+    print_header("LoRA Hyperparameters")
+    current_rank = rl_config.get("lora_rank", 16)
+    current_lr = rl_config.get("learning_rate", 2e-6)
+    current_batch = rl_config.get("min_batch_size", 8)
+
+    print_info(f"  LoRA rank: {current_rank}  (smaller = less VRAM, larger = more capacity)")
+    print_info(f"  Learning rate: {current_lr}")
+    print_info(f"  Min batch size: {current_batch}  (training triggers after this many feedback samples)")
+    print()
+
+    if prompt_yes_no("Use these defaults?", True):
+        lora_rank = current_rank
+        learning_rate = current_lr
+        min_batch = current_batch
+    else:
+        rank_str = prompt("LoRA rank (8, 16, 32, 64)", default=str(current_rank))
+        try:
+            lora_rank = int(rank_str)
+        except ValueError:
+            lora_rank = current_rank
+        lr_str = prompt("Learning rate", default=str(current_lr))
+        try:
+            learning_rate = float(lr_str)
+        except ValueError:
+            learning_rate = current_lr
+        batch_str = prompt("Min batch size for training", default=str(current_batch))
+        try:
+            min_batch = int(batch_str)
+        except ValueError:
+            min_batch = current_batch
+
+    # Step 6: Summary
+    print()
+    print_header("Online RL Configuration Summary")
+    print_info(f"  Server:          {base_url}")
+    print_info(f"  Base model:      {training_model}")
+    print_info(f"  Show feedback:   {'Yes' if show_feedback else 'No'}")
+    print_info(f"  LoRA rank:       {lora_rank}")
+    print_info(f"  Learning rate:   {learning_rate}")
+    print_info(f"  Min batch size:  {min_batch}")
+    print()
+
+    if prompt_yes_no("Save this configuration?", True):
+        rl_config["enabled"] = True
+        rl_config["prompt_after_response"] = show_feedback
+        rl_config["local_only"] = True
+        rl_config["training_base_model"] = training_model
+        rl_config["lora_rank"] = lora_rank
+        rl_config["lora_alpha"] = lora_rank * 2
+        rl_config["learning_rate"] = learning_rate
+        rl_config["min_batch_size"] = min_batch
+        rl_config["builtin_trainer"] = True
+        config["online_rl"] = rl_config
+
+        # Also ensure model.base_url is set if not already
+        if base_url:
+            model_cfg = config.get("model")
+            if isinstance(model_cfg, dict):
+                model_cfg.setdefault("base_url", base_url)
+            else:
+                config.setdefault("model", {"base_url": base_url})
+
+        print_success("Online RL enabled! Feedback will train LoRA adapters locally.")
+        print_info("  Disable anytime: hermes config set online_rl.enabled false")
+    else:
+        print_info("Online RL setup skipped.")
+
+
+# =============================================================================
 # Main Wizard Orchestrator
 # =============================================================================
 
@@ -3092,6 +3310,7 @@ SETUP_SECTIONS = [
     ("gateway", "Messaging Platforms (Gateway)", setup_gateway),
     ("tools", "Tools", setup_tools),
     ("agent", "Agent Settings", setup_agent_settings),
+    ("online-rl", "Online RL", setup_online_rl),
 ]
 
 
@@ -3105,6 +3324,7 @@ def run_setup_wizard(args):
       hermes setup gateway   — just messaging platforms
       hermes setup tools     — just tool configuration
       hermes setup agent     — just agent settings
+      hermes setup online-rl — configure online RL with LoRA adapters
     """
     ensure_hermes_home()
 
@@ -3212,6 +3432,7 @@ def run_setup_wizard(args):
             "Messaging Platforms (Gateway)",
             "Tools",
             "Agent Settings",
+            "Online RL (LoRA adapter training)",
             "---",
             "Exit",
         ]
@@ -3227,14 +3448,14 @@ def run_setup_wizard(args):
         elif choice == 1:
             # Full setup — fall through to run all sections
             pass
-        elif choice in (2, 8):
+        elif choice in (2, 9):
             # Separator — treat as exit
             print_info("Exiting. Run 'hermes setup' again when ready.")
             return
-        elif choice == 9:
+        elif choice == 10:
             print_info("Exiting. Run 'hermes setup' again when ready.")
             return
-        elif 3 <= choice <= 7:
+        elif 3 <= choice <= 8:
             # Individual section
             section_idx = choice - 3
             _, label, func = SETUP_SECTIONS[section_idx]

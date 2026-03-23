@@ -26,7 +26,59 @@ from typing import Dict, Any, List, Optional
 
 DEFAULT_DB_PATH = Path(os.getenv("HERMES_HOME", Path.home() / ".hermes")) / "state.db"
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
+
+RL_FEEDBACK_UPWEIGHT = "upweight"
+RL_FEEDBACK_DOWNWEIGHT = "downweight"
+RL_FEEDBACK_NO_RL = "no_rl"
+RL_FEEDBACK_LABELS = frozenset({
+    RL_FEEDBACK_UPWEIGHT,
+    RL_FEEDBACK_DOWNWEIGHT,
+    RL_FEEDBACK_NO_RL,
+})
+RL_FEEDBACK_REWARDS = {
+    RL_FEEDBACK_UPWEIGHT: 1.0,
+    RL_FEEDBACK_DOWNWEIGHT: -1.0,
+    RL_FEEDBACK_NO_RL: 0.0,
+}
+TRAINABLE_RL_FEEDBACK_LABELS = frozenset({
+    RL_FEEDBACK_UPWEIGHT,
+    RL_FEEDBACK_DOWNWEIGHT,
+})
+
+
+def normalize_rl_feedback_label(value: Optional[str]) -> str:
+    """Normalize a user-facing RL feedback label to the canonical DB value."""
+    raw = str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+    aliases = {
+        "up": RL_FEEDBACK_UPWEIGHT,
+        "upvote": RL_FEEDBACK_UPWEIGHT,
+        "positive": RL_FEEDBACK_UPWEIGHT,
+        "down": RL_FEEDBACK_DOWNWEIGHT,
+        "downvote": RL_FEEDBACK_DOWNWEIGHT,
+        "negative": RL_FEEDBACK_DOWNWEIGHT,
+        "none": RL_FEEDBACK_NO_RL,
+        "neutral": RL_FEEDBACK_NO_RL,
+        "no": RL_FEEDBACK_NO_RL,
+        "no_rl": RL_FEEDBACK_NO_RL,
+        "norl": RL_FEEDBACK_NO_RL,
+    }
+    normalized = aliases.get(raw, raw)
+    if normalized not in RL_FEEDBACK_LABELS:
+        raise ValueError(
+            f"Invalid RL feedback label '{value}'. "
+            f"Expected one of: {', '.join(sorted(RL_FEEDBACK_LABELS))}"
+        )
+    return normalized
+
+
+def is_trainable_rl_feedback_label(value: Optional[str]) -> bool:
+    """Return True when a label should be exported into the live training queue."""
+    try:
+        normalized = normalize_rl_feedback_label(value)
+    except ValueError:
+        return False
+    return normalized in TRAINABLE_RL_FEEDBACK_LABELS
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -80,6 +132,24 @@ CREATE INDEX IF NOT EXISTS idx_sessions_source ON sessions(source);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_started ON sessions(started_at DESC);
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, timestamp);
+
+CREATE TABLE IF NOT EXISTS rl_feedback (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
+    label TEXT NOT NULL,
+    reward REAL NOT NULL,
+    source TEXT,
+    metadata TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    trainer_status TEXT NOT NULL DEFAULT 'pending',
+    export_path TEXT,
+    last_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_rl_feedback_status ON rl_feedback(trainer_status, created_at);
+CREATE INDEX IF NOT EXISTS idx_rl_feedback_session ON rl_feedback(session_id, created_at DESC);
 """
 
 FTS_SQL = """
@@ -189,6 +259,30 @@ class SessionDB:
                     except sqlite3.OperationalError:
                         pass
                 cursor.execute("UPDATE schema_version SET version = 5")
+            if current_version < 6:
+                cursor.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS rl_feedback (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        session_id TEXT NOT NULL REFERENCES sessions(id),
+                        message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
+                        label TEXT NOT NULL,
+                        reward REAL NOT NULL,
+                        source TEXT,
+                        metadata TEXT,
+                        created_at REAL NOT NULL,
+                        updated_at REAL NOT NULL,
+                        trainer_status TEXT NOT NULL DEFAULT 'pending',
+                        export_path TEXT,
+                        last_error TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_rl_feedback_status
+                        ON rl_feedback(trainer_status, created_at);
+                    CREATE INDEX IF NOT EXISTS idx_rl_feedback_session
+                        ON rl_feedback(session_id, created_at DESC);
+                    """
+                )
+                cursor.execute("UPDATE schema_version SET version = 6")
 
         # Unique title index — always ensure it exists (safe to run after migrations
         # since the title column is guaranteed to exist at this point)
@@ -653,6 +747,24 @@ class SessionDB:
             result.append(msg)
         return result
 
+    def get_message(self, message_id: int) -> Optional[Dict[str, Any]]:
+        """Load a single message row by its autoincrement ID."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT * FROM messages WHERE id = ?",
+                (int(message_id),),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        msg = dict(row)
+        if msg.get("tool_calls"):
+            try:
+                msg["tool_calls"] = json.loads(msg["tool_calls"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return msg
+
     def get_messages_as_conversation(self, session_id: str) -> List[Dict[str, Any]]:
         """
         Load messages in the OpenAI conversation format (role + content dicts).
@@ -679,6 +791,268 @@ class SessionDB:
                     pass
             messages.append(msg)
         return messages
+
+    def get_last_assistant_message(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Return the most recent assistant message for a session."""
+        with self._lock:
+            cursor = self._conn.execute(
+                """SELECT * FROM messages
+                   WHERE session_id = ? AND role = 'assistant'
+                   ORDER BY timestamp DESC, id DESC
+                   LIMIT 1""",
+                (session_id,),
+            )
+            row = cursor.fetchone()
+        if not row:
+            return None
+        msg = dict(row)
+        if msg.get("tool_calls"):
+            try:
+                msg["tool_calls"] = json.loads(msg["tool_calls"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return msg
+
+    def get_rl_feedback(self, *, feedback_id: int = None, message_id: int = None) -> Optional[Dict[str, Any]]:
+        """Load a stored RL feedback row by feedback ID or message ID."""
+        if feedback_id is None and message_id is None:
+            raise ValueError("feedback_id or message_id is required")
+        query = "SELECT * FROM rl_feedback WHERE id = ?" if feedback_id is not None else "SELECT * FROM rl_feedback WHERE message_id = ?"
+        value = int(feedback_id if feedback_id is not None else message_id)
+        with self._lock:
+            cursor = self._conn.execute(query, (value,))
+            row = cursor.fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        if result.get("metadata"):
+            try:
+                result["metadata"] = json.loads(result["metadata"])
+            except (json.JSONDecodeError, TypeError):
+                pass
+        return result
+
+    def set_rl_feedback(
+        self,
+        session_id: str,
+        message_id: int,
+        label: str,
+        *,
+        source: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Create or update the RL feedback label attached to an assistant turn."""
+        normalized = normalize_rl_feedback_label(label)
+        reward = RL_FEEDBACK_REWARDS[normalized]
+        message = self.get_message(message_id)
+        if not message:
+            raise ValueError(f"Message {message_id} not found")
+        if str(message.get("session_id")) != str(session_id):
+            raise ValueError(
+                f"Message {message_id} does not belong to session {session_id}"
+            )
+        if message.get("role") != "assistant":
+            raise ValueError(
+                f"RL feedback can only target assistant messages, got role='{message.get('role')}'"
+            )
+
+        now = time.time()
+        metadata_json = json.dumps(metadata, ensure_ascii=False) if metadata is not None else None
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO rl_feedback (
+                    session_id, message_id, label, reward, source, metadata,
+                    created_at, updated_at, trainer_status, export_path, last_error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, NULL)
+                ON CONFLICT(message_id) DO UPDATE SET
+                    label = excluded.label,
+                    reward = excluded.reward,
+                    source = excluded.source,
+                    metadata = excluded.metadata,
+                    updated_at = excluded.updated_at,
+                    trainer_status = 'pending',
+                    export_path = NULL,
+                    last_error = NULL
+                """,
+                (
+                    session_id,
+                    int(message_id),
+                    normalized,
+                    reward,
+                    source,
+                    metadata_json,
+                    now,
+                    now,
+                ),
+            )
+            self._conn.commit()
+        feedback = self.get_rl_feedback(message_id=message_id)
+        if not feedback:
+            raise RuntimeError("Failed to persist RL feedback")
+        return feedback
+
+    def list_rl_feedback(
+        self,
+        *,
+        limit: int = 20,
+        pending_only: bool = False,
+        include_neutral: bool = True,
+        session_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List RL feedback rows with basic message/session context."""
+        limit = max(1, int(limit))
+        where = []
+        params: List[Any] = []
+        if pending_only:
+            where.append("f.trainer_status = 'pending'")
+        if not include_neutral:
+            where.append("f.label IN (?, ?)")
+            params.extend([RL_FEEDBACK_UPWEIGHT, RL_FEEDBACK_DOWNWEIGHT])
+        if session_id:
+            where.append("f.session_id = ?")
+            params.append(session_id)
+
+        where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+        query = f"""
+            SELECT
+                f.*,
+                m.content AS message_content,
+                m.role AS message_role,
+                s.source AS session_source,
+                s.model AS session_model
+            FROM rl_feedback f
+            JOIN messages m ON m.id = f.message_id
+            JOIN sessions s ON s.id = f.session_id
+            {where_sql}
+            ORDER BY f.updated_at DESC, f.id DESC
+            LIMIT ?
+        """
+        params.append(limit)
+        with self._lock:
+            cursor = self._conn.execute(query, tuple(params))
+            rows = cursor.fetchall()
+        results = []
+        for row in rows:
+            item = dict(row)
+            if item.get("metadata"):
+                try:
+                    item["metadata"] = json.loads(item["metadata"])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            results.append(item)
+        return results
+
+    def build_rl_feedback_export_rows(
+        self,
+        *,
+        pending_only: bool = False,
+        include_neutral: bool = False,
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        """Build JSON-serializable export rows for feedback-driven RL tooling."""
+        feedback_rows = self.list_rl_feedback(
+            limit=limit,
+            pending_only=pending_only,
+            include_neutral=include_neutral,
+        )
+        exports: List[Dict[str, Any]] = []
+        for feedback in feedback_rows:
+            session = self.get_session(feedback["session_id"])
+            if not session:
+                continue
+            messages = self.get_messages(feedback["session_id"])
+            conversation: List[Dict[str, Any]] = []
+            prompt_messages: List[Dict[str, Any]] = []
+            assistant_message: Optional[Dict[str, Any]] = None
+            for msg in messages:
+                conversation.append(msg)
+                if int(msg["id"]) == int(feedback["message_id"]):
+                    assistant_message = msg
+                    break
+                prompt_messages.append(msg)
+            if assistant_message is None:
+                continue
+            exports.append(
+                {
+                    "feedback_id": feedback["id"],
+                    "session_id": feedback["session_id"],
+                    "message_id": feedback["message_id"],
+                    "label": feedback["label"],
+                    "reward": feedback["reward"],
+                    "source": feedback.get("source"),
+                    "metadata": feedback.get("metadata"),
+                    "created_at": feedback["created_at"],
+                    "updated_at": feedback["updated_at"],
+                    "trainable": feedback["label"] in TRAINABLE_RL_FEEDBACK_LABELS,
+                    "session": {
+                        "id": session["id"],
+                        "source": session.get("source"),
+                        "model": session.get("model"),
+                        "started_at": session.get("started_at"),
+                        "title": session.get("title"),
+                    },
+                    "prompt_messages": prompt_messages,
+                    "assistant_message": assistant_message,
+                    "conversation": conversation,
+                    "response_text": assistant_message.get("content", ""),
+                }
+            )
+        return exports
+
+    def export_rl_feedback_jsonl(
+        self,
+        output_path: Path,
+        *,
+        pending_only: bool = False,
+        include_neutral: bool = False,
+        limit: int = 1000,
+    ) -> List[Dict[str, Any]]:
+        """Write RL feedback export rows to JSONL and return the exported rows."""
+        rows = self.build_rl_feedback_export_rows(
+            pending_only=pending_only,
+            include_neutral=include_neutral,
+            limit=limit,
+        )
+        path = Path(output_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        return rows
+
+    def mark_rl_feedback_status(
+        self,
+        feedback_ids: List[int],
+        *,
+        trainer_status: str,
+        export_path: Optional[str] = None,
+        last_error: Optional[str] = None,
+    ) -> None:
+        """Bulk-update trainer/export status for a set of feedback rows."""
+        if not feedback_ids:
+            return
+        placeholders = ",".join("?" for _ in feedback_ids)
+        params: List[Any] = [
+            trainer_status,
+            export_path,
+            last_error,
+            time.time(),
+            *[int(fid) for fid in feedback_ids],
+        ]
+        with self._lock:
+            self._conn.execute(
+                f"""
+                UPDATE rl_feedback
+                SET trainer_status = ?,
+                    export_path = ?,
+                    last_error = ?,
+                    updated_at = ?
+                WHERE id IN ({placeholders})
+                """,
+                tuple(params),
+            )
+            self._conn.commit()
 
     # =========================================================================
     # Search
