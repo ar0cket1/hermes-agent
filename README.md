@@ -184,7 +184,7 @@ Both backends implement identical LoRA training with the same MIS-PO objective. 
 | Warmup steps | 20 | Gradual LR ramp |
 | Train steps per batch | 16 | Steps per training trigger |
 | Gradient accumulation | 4 | Effective batch = 4 examples |
-| Max sequence length | 4096 | Truncates longer trajectories |
+| Max sequence length | 262144 (256K) | Truncates longer trajectories |
 | Grad norm clip | 1.0 | Prevents exploding gradients |
 | Min batch size | 8 | Feedback samples before training fires |
 | Max saved adapters | 4 | Keeps last 4, auto-cleans older ones |
@@ -348,7 +348,7 @@ online_rl:
   gradient_accumulation_steps: 4
   min_batch_size: 8
   max_batch_size: 64
-  max_sequence_length: 4096
+  max_sequence_length: 262144
 
   # Adapter management
   adapter_name: hermes-online-rl

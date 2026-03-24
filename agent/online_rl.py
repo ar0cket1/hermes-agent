@@ -112,7 +112,7 @@ def load_online_rl_config() -> Dict[str, Any]:
         "token_ratio_max": _safe_float(cfg.get("token_ratio_max", 1.25), 1.25),
         "trajectory_ratio_min": _safe_float(cfg.get("trajectory_ratio_min", 0.9), 0.9),
         "trajectory_ratio_max": _safe_float(cfg.get("trajectory_ratio_max", 1.1), 1.1),
-        "max_sequence_length": _safe_int(cfg.get("max_sequence_length", 4096), 4096),
+        "max_sequence_length": _safe_int(cfg.get("max_sequence_length", 262144), 262144),
         "lora_rank": _safe_int(cfg.get("lora_rank", 16), 16),
         "lora_alpha": _safe_int(cfg.get("lora_alpha", 32), 32),
         "lora_dropout": _safe_float(cfg.get("lora_dropout", 0.05), 0.05),
