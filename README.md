@@ -1,177 +1,420 @@
-<p align="center">
-  <img src="assets/banner.png" alt="Hermes Agent" width="100%">
-</p>
+# Hermes Agent Online RL
 
-# Hermes Agent ☤
+**Self-improving AI through human feedback — train LoRA adapters live as you use [Hermes Agent](https://github.com/NousResearch/hermes-agent).**
 
-<p align="center">
-  <a href="https://hermes-agent.nousresearch.com/docs/"><img src="https://img.shields.io/badge/Docs-hermes--agent.nousresearch.com-FFD700?style=for-the-badge" alt="Documentation"></a>
-  <a href="https://discord.gg/NousResearch"><img src="https://img.shields.io/badge/Discord-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord"></a>
-  <a href="https://github.com/NousResearch/hermes-agent/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green?style=for-the-badge" alt="License: MIT"></a>
-  <a href="https://nousresearch.com"><img src="https://img.shields.io/badge/Built%20by-Nous%20Research-blueviolet?style=for-the-badge" alt="Built by Nous Research"></a>
-</p>
-
-**The self-improving AI agent built by [Nous Research](https://nousresearch.com).** It's the only agent with a built-in learning loop — it creates skills from experience, improves them during use, nudges itself to persist knowledge, searches its own past conversations, and builds a deepening model of who you are across sessions. Run it on a $5 VPS, a GPU cluster, or serverless infrastructure that costs nearly nothing when idle. It's not tied to your laptop — talk to it from Telegram while it works on a cloud VM.
-
-Use any model you want — [Nous Portal](https://portal.nousresearch.com), [OpenRouter](https://openrouter.ai) (200+ models), [z.ai/GLM](https://z.ai), [Kimi/Moonshot](https://platform.moonshot.ai), [MiniMax](https://www.minimax.io), OpenAI, or your own endpoint. Switch with `hermes model` — no code changes, no lock-in.
-
-<table>
-<tr><td><b>A real terminal interface</b></td><td>Full TUI with multiline editing, slash-command autocomplete, conversation history, interrupt-and-redirect, and streaming tool output.</td></tr>
-<tr><td><b>Lives where you do</b></td><td>Telegram, Discord, Slack, WhatsApp, Signal, and CLI — all from a single gateway process. Voice memo transcription, cross-platform conversation continuity.</td></tr>
-<tr><td><b>A closed learning loop</b></td><td>Agent-curated memory with periodic nudges. Autonomous skill creation after complex tasks. Skills self-improve during use. FTS5 session search with LLM summarization for cross-session recall. <a href="https://github.com/plastic-labs/honcho">Honcho</a> dialectic user modeling. Compatible with the <a href="https://agentskills.io">agentskills.io</a> open standard.</td></tr>
-<tr><td><b>Scheduled automations</b></td><td>Built-in cron scheduler with delivery to any platform. Daily reports, nightly backups, weekly audits — all in natural language, running unattended.</td></tr>
-<tr><td><b>Delegates and parallelizes</b></td><td>Spawn isolated subagents for parallel workstreams. Write Python scripts that call tools via RPC, collapsing multi-step pipelines into zero-context-cost turns.</td></tr>
-<tr><td><b>Runs anywhere, not just your laptop</b></td><td>Six terminal backends — local, Docker, SSH, Daytona, Singularity, and Modal. Daytona and Modal offer serverless persistence — your agent's environment hibernates when idle and wakes on demand, costing nearly nothing between sessions. Run it on a $5 VPS or a GPU cluster.</td></tr>
-<tr><td><b>Research-ready</b></td><td>Batch trajectory generation, Atropos RL environments, trajectory compression for training the next generation of tool-calling models.</td></tr>
-</table>
+Every time you interact with Hermes Agent, you're rolling out a trajectory from your local model. This project adds a tight feedback loop: after each response, you rate it (upweight / downweight / skip), and those signals continuously train a LoRA adapter using **MIS-PO** — the same RL algorithm behind [Step 3.5 Flash](https://arxiv.org/abs/2602.10604). Your model gets better at *your* workflows, on *your* hardware, without ever sending data to a remote server.
 
 ---
 
-## Quick Install
+## Why Online RL on Hermes Agent?
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+Traditional RLHF requires collecting large datasets, training offline, and deploying new checkpoints. Online RL collapses this into a single continuous loop:
+
+| Traditional RLHF | Hermes Online RL |
+|---|---|
+| Collect thousands of preference pairs | Rate responses as you use them |
+| Train offline on a GPU cluster | LoRA trains locally in the background |
+| Deploy a new model checkpoint | Adapter hot-loads into your running server |
+| Generic model for all users | Personalized to your exact workflows |
+| Weeks of iteration | Minutes between feedback and improvement |
+
+### What This Means in Practice
+
+- **Code assistant that learns your style** — Upweight responses that follow your conventions, downweight ones that don't. After a few sessions, the model defaults to your preferred patterns.
+- **Research workflows** — If you use Hermes for literature review, data analysis, or writing, the model learns what level of detail you want, which tools you prefer, and how you like results formatted.
+- **Agentic tasks** — When Hermes plans multi-step terminal commands, file operations, or web research, your feedback teaches it which strategies work for your environment.
+- **Domain specialization** — Working in a specific codebase, language, or field? The LoRA adapter accumulates domain knowledge from your corrections.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Hermes Agent CLI                          │
+│                                                             │
+│  User prompt ──► Local Model (vLLM/Ollama/MLX) ──► Response │
+│                         │                          │        │
+│                    LoRA Adapter                     │        │
+│                    (hot-loaded)              ┌──────┴──────┐ │
+│                         ▲                   │  Feedback UI │ │
+│                         │                   │  [1] ⬆ Up    │ │
+│                         │                   │  [2] ⬇ Down  │ │
+│                         │                   │  [3] ⊘ Skip  │ │
+│                         │                   └──────┬──────┘ │
+│                         │                          │        │
+│                   ┌─────┴──────┐                   │        │
+│                   │  MIS-PO    │◄──────────────────┘        │
+│                   │  Trainer   │                             │
+│                   │ PyTorch/MLX│  Fires after min_batch_size │
+│                   └────────────┘  feedback samples (def: 8)  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-Works on Linux, macOS, and WSL2. The installer handles everything — Python, Node.js, dependencies, and the `hermes` command. No prerequisites except git.
+### Multi-Backend Training
 
-> **Windows:** Native Windows is not supported. Please install [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install) and run the command above.
+The trainer automatically selects the best backend for your hardware:
 
-After installation:
+| Hardware | Backend | How It Works |
+|---|---|---|
+| **Apple Silicon (M1–M5)** | MLX | Native Metal acceleration via `mlx` + `mlx-lm`. Zero-copy unified memory. |
+| **NVIDIA GPU** | PyTorch (CUDA) | Standard PyTorch with `torch.cuda`. BF16/FP16 auto-selected. |
+| **Apple (no MLX installed)** | PyTorch (MPS) | Falls back to Metal Performance Shaders via PyTorch. |
+| **CPU** | PyTorch (CPU) | Works everywhere, just slower. FP32. |
+
+**Auto-detection is the default.** Set `device: auto` (or omit it) and the trainer picks the right backend. You can override with `device: mlx`, `device: cuda`, `device: mps`, or `device: cpu`.
+
+### The Feedback Loop
+
+1. **You chat with Hermes** using any workflow — coding, research, writing, tool use
+2. **After each response**, a compact feedback panel appears with three options:
+   - **Upweight** (`1` or `↑/Enter`) — reward = +1.0, "learn from this"
+   - **Downweight** (`2` or `↓/Enter`) — reward = -1.0, "unlearn this"
+   - **Skip** (`3` or `↓↓/Enter`) — no training signal
+3. **Feedback accumulates** in a local SQLite database with full trajectory context
+4. **When `min_batch_size` samples are collected** (default: 8), the MIS-PO trainer fires automatically in the background
+5. **The trained LoRA adapter is hot-loaded** into your running vLLM or Ollama server (or saved to disk for MLX)
+6. **Next response uses the updated adapter** — the loop continues
+
+---
+
+## MIS-PO: The RL Algorithm
+
+This implementation uses **Metropolis Independence Sampling - Filtered Policy Optimization (MIS-PO)**, the same algorithm introduced in the [Step 3.5 Flash technical report](https://arxiv.org/abs/2602.10604). MIS-PO is specifically designed for stable RL on language models without requiring grouped rollouts.
+
+### Why MIS-PO over PPO/GRPO?
+
+| Algorithm | Requires | Issue for Online RL |
+|---|---|---|
+| PPO | Grouped rollouts, critic network | Too heavy — needs multiple responses per prompt, doubles VRAM for critic |
+| GRPO | Multiple rollouts per prompt | Can't do this in real-time — user only sees one response |
+| REINFORCE | Nothing extra | High variance, unstable |
+| **MIS-PO** | **Single trajectory + binary filtering** | **Perfect for online RL — one response = one trajectory** |
+
+### The Objective
+
+MIS-PO uses a REINFORCE-style policy gradient with binary masking instead of continuous importance weighting:
+
+```
+L_actor = -E[I(τ) · log π_θ(a_t|s_t) · Â_t]
+```
+
+Where `I(τ)` is a binary indicator that filters off-policy samples at two granularities:
+
+**Token-level filtering:** For each token, compute the probability ratio between the training policy and the inference policy:
+
+```
+x_t = π_θ_train(a_t|s_t) / π_θ_inference(a_t|s_t)
+```
+
+Only tokens where `ρ_min ≤ x_t ≤ ρ_max` contribute to the gradient. Default bounds: `[0.8, 1.25]`.
+
+**Trajectory-level filtering:** Compute the geometric mean of token ratios across the full assistant response:
+
+```
+ρ̄(τ) = (∏_t x_t)^(1/T)
+```
+
+The entire trajectory is rejected if `ρ̄(τ)` falls outside `[0.9, 1.1]`. This prevents accumulated small token-level drifts from corrupting the gradient.
+
+### KL Regularization
+
+An unbiased KL divergence penalty prevents the adapter from drifting too far from the base model:
+
+```
+L_KL = E[exp(log_ratio) - log_ratio - 1]
+```
+
+With coefficient `β = 0.001` (matching Step 3.5 Flash). This is the Schulman k3 estimator — unbiased and low-variance.
+
+**VRAM impact of KL: zero.** The KL term reuses tensors already computed for the actor loss (`new_logprobs`, `old_logprobs`). No additional forward pass or model copy needed.
+
+### Why Binary Filtering > Clipping
+
+PPO clips the importance ratio to `[1-ε, 1+ε]`, which still passes scaled gradients from off-policy tokens. MIS-PO completely excludes off-policy tokens, treating the remaining ones as on-policy. This:
+
+- Reduces gradient variance (empirically 5x lower than PPO per Step 3.5 Flash)
+- Is more stable for long trajectories where small per-token errors compound
+- Works with a single trajectory (no need for the "group" in GRPO)
+
+---
+
+## LoRA Training Details
+
+### Why LoRA?
+
+Full fine-tuning would require storing optimizer states for every parameter — 2-4x the model's VRAM. LoRA trains only low-rank adapter matrices (~0.1-1% of parameters), keeping VRAM overhead minimal:
+
+| Component | VRAM |
+|---|---|
+| Base model (frozen) | Same as inference |
+| LoRA adapter parameters | ~10-50 MB |
+| LoRA gradients + optimizer states | ~30-150 MB |
+| One forward/backward pass activations | Same as inference |
+| **Total training overhead** | **~50-200 MB above inference** |
+
+Since you're already running the model locally for inference, training adds minimal extra VRAM.
+
+### MLX vs PyTorch LoRA
+
+Both backends implement identical LoRA training with the same MIS-PO objective. The difference is the underlying framework:
+
+| Aspect | PyTorch Backend | MLX Backend |
+|---|---|---|
+| Library | `torch` + `peft` | `mlx` + `mlx-lm` |
+| Adapter format | PEFT safetensors | mlx-lm `adapters.safetensors` |
+| LoRA application | `peft.get_peft_model()` | `mlx_lm.tuner.linear_to_lora_layers()` |
+| Autodiff | `loss.backward()` | `mlx.nn.value_and_grad()` |
+| Optimizer | `torch.optim.AdamW` | `mlx.optimizers.AdamW` |
+| Memory model | Separate CPU/GPU memory | Unified memory (zero-copy) |
+| Quantized training | Manual setup | Automatic QLoRA when loading 4-bit models |
+
+**Apple Silicon advantage:** MLX leverages unified memory, meaning the model, optimizer states, and activations share the same memory pool — no CPU↔GPU copies. A 7B model that needs 14GB for inference might only need ~14.5GB total for inference + LoRA training.
+
+### Default Hyperparameters
+
+| Parameter | Default | Notes |
+|---|---|---|
+| LoRA rank | 16 | Good balance of capacity vs. VRAM |
+| LoRA alpha | 32 | 2x rank (standard scaling) |
+| LoRA dropout | 0.05 | Light regularization |
+| Target modules | `q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj` | All attention + MLP projections |
+| Learning rate | 2e-6 | Conservative for stability |
+| Weight decay | 0.1 | AdamW regularization |
+| Warmup steps | 20 | Gradual LR ramp |
+| Train steps per batch | 16 | Steps per training trigger |
+| Gradient accumulation | 4 | Effective batch = 4 examples |
+| Max sequence length | 4096 | Truncates longer trajectories |
+| Grad norm clip | 1.0 | Prevents exploding gradients |
+| Min batch size | 8 | Feedback samples before training fires |
+| Max saved adapters | 4 | Keeps last 4, auto-cleans older ones |
+
+### Adapter Lifecycle
+
+1. **First training:** Creates a fresh LoRA adapter from the base model
+2. **Subsequent trainings:** Loads the previous adapter and continues training (warm-start)
+3. **Hot-loading:** After training, the adapter is published to vLLM (`/v1/load_lora_adapter`), Ollama (`ollama create`), or saved to disk (MLX)
+4. **Cleanup:** Only the last `max_saved_adapters` checkpoints are kept on disk
+
+---
+
+## Installation & Setup
+
+### Prerequisites
+
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) installed and working
+- A local model server (vLLM, Ollama, llama.cpp, LM Studio) — or MLX for Apple Silicon native inference
+- Python 3.11+
+
+### Install
+
+**For NVIDIA GPU / CPU (PyTorch backend):**
 
 ```bash
-source ~/.bashrc    # reload shell (or: source ~/.zshrc)
-hermes              # start chatting!
+pip install -e ".[online-rl]"
+```
+
+This installs `torch`, `transformers`, and `peft`.
+
+**For Apple Silicon (MLX backend):**
+
+```bash
+pip install -e ".[online-rl-mlx]"
+```
+
+This installs `mlx` and `mlx-lm`. The trainer auto-detects Apple Silicon and uses MLX natively.
+
+**For both backends (maximum compatibility):**
+
+```bash
+pip install -e ".[online-rl,online-rl-mlx]"
+```
+
+### Configure
+
+```bash
+# Interactive setup wizard
+hermes setup online-rl
+
+# Or configure manually
+hermes config set online_rl.enabled true
+hermes config set online_rl.prompt_after_response true
+hermes config set online_rl.training_base_model "your-model-name"
+hermes config set online_rl.local_only true
+```
+
+**MLX-specific example:**
+
+```yaml
+# ~/.hermes/config.yaml
+online_rl:
+  enabled: true
+  prompt_after_response: true
+  training_base_model: mlx-community/Mistral-7B-Instruct-v0.3-4bit
+  device: auto  # auto-detects MLX on Apple Silicon
+```
+
+> **Tip:** Use quantized models from the [mlx-community](https://huggingface.co/mlx-community) on Hugging Face for best MLX performance. 4-bit models automatically get QLoRA — the base stays quantized while only LoRA weights train in full precision.
+
+The setup wizard will:
+1. Scan for local inference servers (vLLM, Ollama, llama.cpp, LM Studio)
+2. Auto-detect available models
+3. Let you configure LoRA hyperparameters
+4. Write everything to `~/.hermes/config.yaml`
+
+### Use
+
+```bash
+hermes  # start chatting — feedback panel appears after each response
+```
+
+Press `1` to upweight, `2` to downweight, `3` to skip. After 8 feedback samples, training fires automatically.
+
+### Monitor
+
+```bash
+hermes online-rl status          # Show config and active adapter
+hermes online-rl list-feedback   # List stored feedback
+hermes online-rl list-feedback --pending  # Only untrained samples
 ```
 
 ---
 
-## Getting Started
+## UI
 
-```bash
-hermes              # Interactive CLI — start a conversation
-hermes model        # Choose your LLM provider and model
-hermes tools        # Configure which tools are enabled
-hermes config set   # Set individual config values
-hermes gateway      # Start the messaging gateway (Telegram, Discord, etc.)
-hermes setup        # Run the full setup wizard (configures everything at once)
-hermes claw migrate # Migrate from OpenClaw (if coming from OpenClaw)
-hermes update       # Update to the latest version
-hermes doctor       # Diagnose any issues
+### Feedback Panel
+
+After each response, a compact panel appears:
+
+```
+╭─ Online RL ──────────────── 42s ─╮
+│                                   │
+│  ▲/▼ navigate  Enter confirm     │
+│                                   │
+│  ❯ ⬆ Upweight   learn from this  │
+│    ⬇ Downweight  unlearn this     │
+│    ⊘ Skip        no training      │
+│                                   │
+╰──────────────────────────────────╯
 ```
 
-📖 **[Full documentation →](https://hermes-agent.nousresearch.com/docs/)**
+- **Countdown timer** in the title bar (auto-skips after timeout)
+- **Number keys** `1`/`2`/`3` for instant selection
+- **Arrow keys + Enter** for navigation
+- **Ctrl+C** to skip
 
-## CLI vs Messaging Quick Reference
+### Status Bar
 
-Hermes has two entry points: start the terminal UI with `hermes`, or run the gateway and talk to it from Telegram, Discord, Slack, WhatsApp, Signal, or Email. Once you're in a conversation, many slash commands are shared across both interfaces.
-
-| Action | CLI | Messaging platforms |
-|---------|-----|---------------------|
-| Start chatting | `hermes` | Run `hermes gateway setup` + `hermes gateway start`, then send the bot a message |
-| Start fresh conversation | `/new` or `/reset` | `/new` or `/reset` |
-| Change model | `/model [provider:model]` | `/model [provider:model]` |
-| Set a personality | `/personality [name]` | `/personality [name]` |
-| Retry or undo the last turn | `/retry`, `/undo` | `/retry`, `/undo` |
-| Compress context / check usage | `/compress`, `/usage`, `/insights [--days N]` | `/compress`, `/usage`, `/insights [days]` |
-| Browse skills | `/skills` or `/<skill-name>` | `/skills` or `/<skill-name>` |
-| Interrupt current work | `Ctrl+C` or send a new message | `/stop` or send a new message |
-| Platform-specific status | `/platforms` | `/status`, `/sethome` |
-
-For the full command lists, see the [CLI guide](https://hermes-agent.nousresearch.com/docs/user-guide/cli) and the [Messaging Gateway guide](https://hermes-agent.nousresearch.com/docs/user-guide/messaging).
+When online RL is active, a green `RL` indicator appears in the bottom status bar alongside the model name and context usage.
 
 ---
 
-## Documentation
+## Configuration Reference
 
-All documentation lives at **[hermes-agent.nousresearch.com/docs](https://hermes-agent.nousresearch.com/docs/)**:
+All settings live under `online_rl:` in `~/.hermes/config.yaml`:
 
-| Section | What's Covered |
-|---------|---------------|
-| [Quickstart](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) | Install → setup → first conversation in 2 minutes |
-| [CLI Usage](https://hermes-agent.nousresearch.com/docs/user-guide/cli) | Commands, keybindings, personalities, sessions |
-| [Configuration](https://hermes-agent.nousresearch.com/docs/user-guide/configuration) | Config file, providers, models, all options |
-| [Messaging Gateway](https://hermes-agent.nousresearch.com/docs/user-guide/messaging) | Telegram, Discord, Slack, WhatsApp, Signal, Home Assistant |
-| [Security](https://hermes-agent.nousresearch.com/docs/user-guide/security) | Command approval, DM pairing, container isolation |
-| [Tools & Toolsets](https://hermes-agent.nousresearch.com/docs/user-guide/features/tools) | 40+ tools, toolset system, terminal backends |
-| [Skills System](https://hermes-agent.nousresearch.com/docs/user-guide/features/skills) | Procedural memory, Skills Hub, creating skills |
-| [Memory](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory) | Persistent memory, user profiles, best practices |
-| [MCP Integration](https://hermes-agent.nousresearch.com/docs/user-guide/features/mcp) | Connect any MCP server for extended capabilities |
-| [Cron Scheduling](https://hermes-agent.nousresearch.com/docs/user-guide/features/cron) | Scheduled tasks with platform delivery |
-| [Context Files](https://hermes-agent.nousresearch.com/docs/user-guide/features/context-files) | Project context that shapes every conversation |
-| [Architecture](https://hermes-agent.nousresearch.com/docs/developer-guide/architecture) | Project structure, agent loop, key classes |
-| [Contributing](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing) | Development setup, PR process, code style |
-| [CLI Reference](https://hermes-agent.nousresearch.com/docs/reference/cli-commands) | All commands and flags |
-| [Environment Variables](https://hermes-agent.nousresearch.com/docs/reference/environment-variables) | Complete env var reference |
+```yaml
+online_rl:
+  enabled: true
+  prompt_after_response: true
+  local_only: true                    # Only activate for localhost servers
+  training_base_model: "your-model"   # HuggingFace model name or path
 
----
+  # MIS-PO bounds (matching Step 3.5 Flash)
+  token_ratio_min: 0.8
+  token_ratio_max: 1.25
+  trajectory_ratio_min: 0.9
+  trajectory_ratio_max: 1.1
+  kl_coefficient: 0.001
 
-## Migrating from OpenClaw
+  # LoRA
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules:
+    - q_proj
+    - k_proj
+    - v_proj
+    - o_proj
+    - gate_proj
+    - up_proj
+    - down_proj
 
-If you're coming from OpenClaw, Hermes can automatically import your settings, memories, skills, and API keys.
+  # Training
+  learning_rate: 0.000002
+  weight_decay: 0.1
+  warmup_steps: 20
+  train_steps: 16
+  gradient_accumulation_steps: 4
+  min_batch_size: 8
+  max_batch_size: 64
+  max_sequence_length: 4096
 
-**During first-time setup:** The setup wizard (`hermes setup`) automatically detects `~/.openclaw` and offers to migrate before configuration begins.
+  # Adapter management
+  adapter_name: hermes-online-rl
+  max_saved_adapters: 4
+  builtin_trainer: true
 
-**Anytime after install:**
-
-```bash
-hermes claw migrate              # Interactive migration (full preset)
-hermes claw migrate --dry-run    # Preview what would be migrated
-hermes claw migrate --preset user-data   # Migrate without secrets
-hermes claw migrate --overwrite  # Overwrite existing conflicts
+  # Device — auto-detects MLX on Apple Silicon, CUDA on NVIDIA, etc.
+  device: auto          # auto, mlx, cuda, mps, cpu
+  torch_dtype: auto     # auto, bf16, fp16, fp32 (PyTorch backend only)
 ```
 
-What gets imported:
-- **SOUL.md** — persona file
-- **Memories** — MEMORY.md and USER.md entries
-- **Skills** — user-created skills → `~/.hermes/skills/openclaw-imports/`
-- **Command allowlist** — approval patterns
-- **Messaging settings** — platform configs, allowed users, working directory
-- **API keys** — allowlisted secrets (Telegram, OpenRouter, OpenAI, Anthropic, ElevenLabs)
-- **TTS assets** — workspace audio files
-- **Workspace instructions** — AGENTS.md (with `--workspace-target`)
-
-See `hermes claw migrate --help` for all options, or use the `openclaw-migration` skill for an interactive agent-guided migration with dry-run previews.
+Environment variable overrides are available for all settings (e.g., `HERMES_ONLINE_RL_ENABLED=true`).
 
 ---
 
-## Contributing
+## Files
 
-We welcome contributions! See the [Contributing Guide](https://hermes-agent.nousresearch.com/docs/developer-guide/contributing) for development setup, code style, and PR process.
-
-Quick start for contributors:
-
-```bash
-git clone https://github.com/NousResearch/hermes-agent.git
-cd hermes-agent
-git submodule update --init mini-swe-agent   # required terminal backend
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv venv venv --python 3.11
-source venv/bin/activate
-uv pip install -e ".[all,dev]"
-uv pip install -e "./mini-swe-agent"
-python -m pytest tests/ -q
-```
-
-> **RL Training (optional):** To work on the RL/Tinker-Atropos integration, also run:
-> ```bash
-> git submodule update --init tinker-atropos
-> uv pip install -e "./tinker-atropos"
-> ```
+| File | Purpose |
+|---|---|
+| `agent/online_rl.py` | Feedback capture, backend detection, adapter publishing (vLLM/Ollama/MLX) |
+| `agent/online_rl_trainer.py` | PyTorch MIS-PO trainer with auto-routing to MLX |
+| `agent/online_rl_trainer_mlx.py` | MLX-native MIS-PO trainer for Apple Silicon |
+| `cli.py` | Feedback panel UI with icons, countdown, hotkeys, RL status bar |
+| `hermes_cli/setup.py` | `setup_online_rl()` wizard with server auto-detection |
+| `hermes_cli/main.py` | `hermes online-rl` subcommands |
+| `hermes_state.py` | RL feedback SQLite schema and queries |
+| `pyproject.toml` | `[online-rl]` and `[online-rl-mlx]` optional dependency groups |
 
 ---
 
-## Community
+## How It Works End-to-End
 
-- 💬 [Discord](https://discord.gg/NousResearch)
-- 📚 [Skills Hub](https://agentskills.io)
-- 🐛 [Issues](https://github.com/NousResearch/hermes-agent/issues)
-- 💡 [Discussions](https://github.com/NousResearch/hermes-agent/discussions)
+1. You run `hermes` and chat normally
+2. Your local model (via vLLM/Ollama/MLX) generates a response — this is a **trajectory rollout**
+3. The feedback panel appears — you press `1` (good), `2` (bad), or `3` (skip)
+4. Feedback is stored in SQLite with the full message context (prompt + response)
+5. When 8+ rated samples accumulate, `maybe_trigger_online_rl_training()` fires
+6. The trainer spawns as a background subprocess:
+   - **Auto-selects backend:** MLX on Apple Silicon, PyTorch+CUDA on NVIDIA, PyTorch+MPS/CPU elsewhere
+   - Loads the base model + existing LoRA adapter (if any)
+   - Computes reference logprobs (π_inference)
+   - Runs 16 MIS-PO training steps with binary filtering
+   - Saves the updated adapter to `~/.hermes/online_rl/adapters/`
+   - Hot-loads it into the running inference server (or saves to disk for MLX)
+7. Your next conversation uses the improved adapter
+8. The cycle repeats — your model continuously improves at your specific workflows
+
+---
+
+## Future Updates
+
+In the future this may be adapted to use tinker as well so you can run Kimi K2.5 with online RL and use a frontier OS model.
+
+---
+
+## References
+
+- [Step 3.5 Flash Technical Report](https://arxiv.org/abs/2602.10604) — MIS-PO algorithm
+- [Hermes Agent](https://github.com/NousResearch/hermes-agent) — Base agent framework
+- [LoRA: Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685)
+- [Trust Region Masking](https://arxiv.org/abs/2512.23075) — Theoretical basis for sequence-level trust regions
+- [MLX](https://github.com/ml-explore/mlx) — Apple's ML framework for Apple Silicon
+- [mlx-lm](https://github.com/ml-explore/mlx-lm) — LLM fine-tuning and inference on MLX
 
 ---
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
-
-Built by [Nous Research](https://nousresearch.com).
+MIT — same as Hermes Agent.
