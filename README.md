@@ -368,14 +368,15 @@ Environment variable overrides are available for all settings (e.g., `HERMES_ONL
 
 | File | Purpose |
 |---|---|
-| `agent/online_rl.py` | Feedback capture, backend detection, adapter publishing (vLLM/Ollama/MLX) |
-| `agent/online_rl_trainer.py` | PyTorch MIS-PO trainer with auto-routing to MLX |
+| `agent/online_rl.py` | Feedback capture, backend detection, adapter publishing (vLLM/Ollama/MLX/Tinker) |
+| `agent/online_rl_trainer.py` | PyTorch MIS-PO trainer with backend routing |
 | `agent/online_rl_trainer_mlx.py` | MLX-native MIS-PO trainer for Apple Silicon |
+| `agent/online_rl_trainer_tinker.py` | Tinker API backend for hosted SOTA model training |
 | `cli.py` | Feedback panel UI with icons, countdown, hotkeys, RL status bar |
 | `hermes_cli/setup.py` | `setup_online_rl()` wizard with server auto-detection |
 | `hermes_cli/main.py` | `hermes online-rl` subcommands |
 | `hermes_state.py` | RL feedback SQLite schema and queries |
-| `pyproject.toml` | `[online-rl]` and `[online-rl-mlx]` optional dependency groups |
+| `pyproject.toml` | `[online-rl]`, `[online-rl-mlx]`, and `[online-rl-tinker]` optional dependency groups |
 
 ---
 
@@ -387,20 +388,33 @@ Environment variable overrides are available for all settings (e.g., `HERMES_ONL
 4. Feedback is stored in SQLite with the full message context (prompt + response)
 5. When 8+ rated samples accumulate, `maybe_trigger_online_rl_training()` fires
 6. The trainer spawns as a background subprocess:
-   - **Auto-selects backend:** MLX on Apple Silicon, PyTorch+CUDA on NVIDIA, PyTorch+MPS/CPU elsewhere
+   - **Auto-selects backend:** Tinker when `TINKER_API_KEY` + `tinker_base_model` are configured, otherwise MLX on Apple Silicon, PyTorch+CUDA on NVIDIA, PyTorch+MPS/CPU elsewhere
    - Loads the base model + existing LoRA adapter (if any)
    - Computes reference logprobs (π_inference)
    - Runs 16 MIS-PO training steps with binary filtering
-   - Saves the updated adapter to `~/.hermes/online_rl/adapters/`
+   - Saves the updated adapter to `~/.hermes/online_rl/adapters/` or publishes the Tinker checkpoint metadata
    - Hot-loads it into the running inference server (or saves to disk for MLX)
 7. Your next conversation uses the improved adapter
 8. The cycle repeats — your model continuously improves at your specific workflows
 
 ---
 
-## Future Updates
+## Tinker Backend
 
-In the future this may be adapted to use tinker as well so you can run Kimi K2.5 with online RL and use a frontier OS model.
+The online RL stack now supports a hosted Tinker backend in addition to local PyTorch and MLX training. That gives you a path to train adapters against frontier base models through Tinker while keeping the same Hermes feedback loop and online adaptation flow.
+
+Use the Tinker path when you want:
+
+- A hosted training backend instead of running local fine-tuning
+- Access to frontier base models such as Kimi-class models
+- The same Hermes feedback capture flow with Tinker-managed checkpoints
+
+Configure it with:
+
+- `TINKER_API_KEY`
+- `WANDB_API_KEY`
+- `online_rl.tinker_base_model`
+- `online_rl.training_backend: tinker` (or leave backend on `auto` and provide the Tinker config)
 
 ---
 
