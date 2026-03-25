@@ -1,8 +1,8 @@
 # Hermes Agent Online RL
 
-**Self-improving AI through human feedback — train LoRA adapters live as you use [Hermes Agent](https://github.com/NousResearch/hermes-agent).**
+**Self-improving AI through human feedback — train LoRA adapters live as you use [Hermes Agent](https://github.com/NousResearch/hermes-agent), from local models all the way up to frontier-scale Tinker runs.**
 
-Every time you interact with Hermes Agent, you're rolling out a trajectory from your local model. This project adds a tight feedback loop: after each response, you rate it (upweight / downweight / skip), and those signals continuously train a LoRA adapter using **MIS-PO** — the same RL algorithm behind [Step 3.5 Flash](https://arxiv.org/abs/2602.10604). Your model gets better at *your* workflows, on *your* hardware, without ever sending data to a remote server.
+Every time you interact with Hermes Agent, you're rolling out a trajectory from your model. This project adds a tight feedback loop: after each response, you rate it (upweight / downweight / skip), and those signals continuously train a LoRA adapter using **MIS-PO** — the same RL algorithm behind [Step 3.5 Flash](https://arxiv.org/abs/2602.10604). On local hardware that means your own model gets sharper with use. With **Tinker**, that same loop now extends to genuinely large models such as **K2.5** and **Nemotron/Nemo 3 Super**, which turns Hermes from a local personalization trick into real continual learning for frontier-class agents.
 
 ---
 
@@ -24,6 +24,7 @@ Traditional RLHF requires collecting large datasets, training offline, and deplo
 - **Research workflows** — If you use Hermes for literature review, data analysis, or writing, the model learns what level of detail you want, which tools you prefer, and how you like results formatted.
 - **Agentic tasks** — When Hermes plans multi-step terminal commands, file operations, or web research, your feedback teaches it which strategies work for your environment.
 - **Domain specialization** — Working in a specific codebase, language, or field? The LoRA adapter accumulates domain knowledge from your corrections.
+- **Frontier-model continual learning** — With Tinker, the exact same feedback loop can keep improving much larger models than you could realistically fine-tune on a local workstation.
 
 ---
 
@@ -57,6 +58,7 @@ The trainer automatically selects the best backend for your hardware:
 
 | Hardware | Backend | How It Works |
 |---|---|---|
+| **Any machine with API access** | Tinker | Hosted online RL for frontier models like K2.5 and Nemotron/Nemo 3 Super. This is the unlock that lets a laptop drive continual learning on models far beyond local VRAM limits. |
 | **Apple Silicon (M1–M5)** | MLX | Native Metal acceleration via `mlx` + `mlx-lm`. Zero-copy unified memory. |
 | **NVIDIA GPU** | PyTorch (CUDA) | Standard PyTorch with `torch.cuda`. BF16/FP16 auto-selected. |
 | **Apple (no MLX installed)** | PyTorch (MPS) | Falls back to Metal Performance Shaders via PyTorch. |
@@ -401,12 +403,17 @@ Environment variable overrides are available for all settings (e.g., `HERMES_ONL
 
 ## Tinker Backend
 
-The online RL stack now supports a hosted Tinker backend in addition to local PyTorch and MLX training. That gives you a path to train adapters against frontier base models through Tinker while keeping the same Hermes feedback loop and online adaptation flow.
+This is the biggest capability jump in the whole stack.
+
+The online RL system now supports a hosted **Tinker** backend in addition to local PyTorch and MLX training. That means Hermes is no longer limited to "whatever you can personally fine-tune on your own box." You can run the exact same continual-learning loop against **frontier-scale base models** through Tinker while keeping the familiar Hermes feedback UX.
+
+In practical terms: Hermes can now do online RL not just for local models, but for models in the **K2.5 / Nemotron/Nemo 3 Super class**. That is a very different category of capability. Instead of only making a local coding model slightly better over time, you can keep adapting a genuinely high-end agent model to your workflows, tool usage, and preferences.
 
 Use the Tinker path when you want:
 
-- A hosted training backend instead of running local fine-tuning
-- Access to frontier base models such as Kimi-class models
+- A hosted training backend instead of being constrained by local VRAM
+- Access to frontier base models such as K2.5 and Nemotron/Nemo 3 Super
+- Continual learning on models that are simply too large to train locally
 - The same Hermes feedback capture flow with Tinker-managed checkpoints
 
 Configure it with:
