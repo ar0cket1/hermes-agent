@@ -1,8 +1,8 @@
 # Hermes Agent Online RL
 
-**Self-improving AI through human feedback — train LoRA adapters live as you use [Hermes Agent](https://github.com/NousResearch/hermes-agent), from local models all the way up to frontier-scale Tinker runs.**
+Online reinforcement learning for [Hermes Agent](https://github.com/NousResearch/hermes-agent), with local MIS-PO training and a Tinker-backed SDPO-style path for hosted models.
 
-Every time you interact with Hermes Agent, you're rolling out a trajectory from your model. This project adds a tight feedback loop: after each response, you can either give a fast **binary reward** (upweight / downweight / skip) or, on **Tinker**, run an **SDPO-style** mode that pairs the label with a short text reward. Binary mode uses a scalar MIS-PO-style update, while the Tinker SDPO path adds frozen-teacher top-K distillation inspired by [Reinforcement Learning via Self-Distillation](https://arxiv.org/abs/2601.20802). On local hardware that means your own model gets sharper with use. With **Tinker**, the same loop now extends to genuinely large models such as **K2.5** and **Nemotron/Nemo 3 Super**, which turns Hermes from a local personalization trick into real continual learning for frontier-class agents.
+Each Hermes response can be treated as a training trajectory. This project adds an online update loop around that trajectory: after each response, you can record a **binary reward** (upweight / downweight / skip) or, on **Tinker**, run an **SDPO-style** mode that pairs the positive or negative label with a short text note. The local path uses a scalar MIS-PO-style update. The Tinker SDPO path uses a frozen-teacher, top-K distillation approximation based on [Reinforcement Learning via Self-Distillation](https://arxiv.org/abs/2601.20802) and the reference implementation in [lasgroup/SDPO](https://github.com/lasgroup/SDPO).
 
 ---
 
@@ -15,16 +15,8 @@ Traditional RLHF requires collecting large datasets, training offline, and deplo
 | Collect thousands of preference pairs | Rate responses as you use them |
 | Train offline on a GPU cluster | LoRA trains locally in the background |
 | Deploy a new model checkpoint | Adapter hot-loads into your running server |
-| Generic model for all users | Personalized to your exact workflows |
+| Shared offline checkpoint | Feedback collected during live usage |
 | Weeks of iteration | Minutes between feedback and improvement |
-
-### What This Means in Practice
-
-- **Code assistant that learns your style** — Upweight responses that follow your conventions, downweight ones that don't. After a few sessions, the model defaults to your preferred patterns.
-- **Research workflows** — If you use Hermes for literature review, data analysis, or writing, the model learns what level of detail you want, which tools you prefer, and how you like results formatted.
-- **Agentic tasks** — When Hermes plans multi-step terminal commands, file operations, or web research, your feedback teaches it which strategies work for your environment.
-- **Domain specialization** — Working in a specific codebase, language, or field? The LoRA adapter accumulates domain knowledge from your corrections.
-- **Frontier-model continual learning** — With Tinker, the exact same feedback loop can keep improving much larger models than you could realistically fine-tune on a local workstation.
 
 ---
 
@@ -58,7 +50,7 @@ The trainer automatically selects the best backend for your hardware:
 
 | Hardware | Backend | How It Works |
 |---|---|---|
-| **Any machine with API access** | Tinker | Hosted online RL for frontier models like K2.5 and Nemotron/Nemo 3 Super. This is the unlock that lets a laptop drive continual learning on models far beyond local VRAM limits. |
+| **Any machine with API access** | Tinker | Hosted online RL with Tinker-managed training and inference. Supports the binary path and a frozen-teacher SDPO-style path. |
 | **Apple Silicon (M1–M5)** | MLX | Native Metal acceleration via `mlx` + `mlx-lm`. Zero-copy unified memory. |
 | **NVIDIA GPU** | PyTorch (CUDA) | Standard PyTorch with `torch.cuda`. BF16/FP16 auto-selected. |
 | **Apple (no MLX installed)** | PyTorch (MPS) | Falls back to Metal Performance Shaders via PyTorch. |
@@ -436,37 +428,6 @@ Hermes now keeps separate default profiles for the two modes:
    - Hot-loads it into the running inference server, saves it for MLX, or updates the active Tinker checkpoint/runtime metadata
 8. Your next conversation uses the improved adapter or Tinker checkpoint
 9. The cycle repeats — your model continuously improves at your specific workflows
-
----
-
-## Tinker Backend
-
-This is the biggest capability jump in the whole stack.
-
-The online RL system now supports a hosted **Tinker** backend in addition to local PyTorch and MLX training. That means Hermes is no longer limited to "whatever you can personally fine-tune on your own box." You can run the exact same continual-learning loop against **frontier-scale base models** through Tinker while keeping the familiar Hermes feedback UX.
-
-In practical terms: Hermes can now do online RL not just for local models, but for models in the **K2.5 / Nemotron/Nemo 3 Super class**. That is a very different category of capability. Instead of only making a local coding model slightly better over time, you can keep adapting a genuinely high-end agent model to your workflows, tool usage, and preferences.
-
-Use the Tinker path when you want:
-
-- A hosted training backend instead of being constrained by local VRAM
-- Access to frontier base models such as K2.5 and Nemotron/Nemo 3 Super
-- Continual learning on models that are simply too large to train locally
-- The same Hermes feedback capture flow with Tinker-managed checkpoints
-
-Configure it with:
-
-- `TINKER_API_KEY`
-- `WANDB_API_KEY`
-- `online_rl.tinker_base_model`
-- `online_rl.backend: tinker` (or leave backend on `auto` and provide the Tinker config)
-
-When you configure Tinker-based online RL through `hermes setup`, Hermes also:
-
-- switches the main runtime provider to `custom`
-- points `model.base_url` at `https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1`
-- sets the visible/default chat model to the selected Tinker model
-- uses the same `TINKER_API_KEY` for both training and inference
 
 ---
 
