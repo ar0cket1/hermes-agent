@@ -18,8 +18,10 @@ from peft import LoraConfig, PeftModel, TaskType, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from agent.online_rl import (
+    ONLINE_RL_ALGORITHM_SDPO,
     load_online_rl_config,
     load_online_rl_state,
+    normalize_online_rl_algorithm,
     publish_online_rl_adapter,
 )
 from hermes_state import SessionDB
@@ -405,7 +407,7 @@ def train_batch(
             "adapter_dir": str(adapter_dir),
             "published_model": published_state.get("active_model_name"),
             "backend": published_state.get("backend"),
-            "algorithm": str(cfg.get("algorithm") or "mis_po"),
+            "algorithm": normalize_online_rl_algorithm(cfg.get("algorithm")),
         }
     )
     return stats
@@ -424,6 +426,12 @@ def run_train_batch(
     is available (or when ``device`` is set to ``"mlx"`` in the config).
     """
     cfg = cfg or load_online_rl_config()
+    algorithm = normalize_online_rl_algorithm(cfg.get("algorithm"))
+    if algorithm == ONLINE_RL_ALGORITHM_SDPO and not _should_use_tinker(cfg):
+        raise RuntimeError(
+            "online_rl.algorithm=sdpo currently requires online_rl.backend=tinker. "
+            "The local PyTorch and MLX trainers only support binary scalar-reward updates."
+        )
     ids = list(feedback_ids or [])
     if not ids:
         env_ids = os.getenv("HERMES_RL_FEEDBACK_IDS", "").strip()
@@ -469,4 +477,3 @@ def run_train_batch(
         raise
     finally:
         db.close()
-

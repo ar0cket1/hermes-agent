@@ -2,7 +2,7 @@
 
 **Self-improving AI through human feedback — train LoRA adapters live as you use [Hermes Agent](https://github.com/NousResearch/hermes-agent), from local models all the way up to frontier-scale Tinker runs.**
 
-Every time you interact with Hermes Agent, you're rolling out a trajectory from your model. This project adds a tight feedback loop: after each response, you rate it (upweight / downweight / skip), and those signals continuously train a LoRA adapter using **MIS-PO** — the same RL algorithm behind [Step 3.5 Flash](https://arxiv.org/abs/2602.10604). On local hardware that means your own model gets sharper with use. With **Tinker**, that same loop now extends to genuinely large models such as **K2.5** and **Nemotron/Nemo 3 Super**, which turns Hermes from a local personalization trick into real continual learning for frontier-class agents.
+Every time you interact with Hermes Agent, you're rolling out a trajectory from your model. This project adds a tight feedback loop: after each response, you can either give a fast **binary reward** (upweight / downweight / skip) or, on **Tinker**, run an **SDPO-style** mode that pairs the label with a short text reward. Binary mode uses a scalar MIS-PO-style update, while the Tinker SDPO path adds frozen-teacher top-K distillation inspired by [Reinforcement Learning via Self-Distillation](https://arxiv.org/abs/2601.20802). On local hardware that means your own model gets sharper with use. With **Tinker**, the same loop now extends to genuinely large models such as **K2.5** and **Nemotron/Nemo 3 Super**, which turns Hermes from a local personalization trick into real continual learning for frontier-class agents.
 
 ---
 
@@ -73,6 +73,7 @@ The trainer automatically selects the best backend for your hardware:
    - **Upweight** (`1` or `↑/Enter`) — reward = +1.0, "learn from this"
    - **Downweight** (`2` or `↓/Enter`) — reward = -1.0, "unlearn this"
    - **Skip** (`3` or `↓↓/Enter`) — no training signal
+   - In **SDPO mode**, Hermes follows the up/down label with a short text note prompt so the teacher can distill from richer feedback.
 3. **Feedback accumulates** in a local SQLite database with full trajectory context
 4. **When `min_batch_size` samples are collected** (default: 8), the MIS-PO trainer fires automatically in the background
 5. **The trained LoRA adapter is hot-loaded** into your running vLLM or Ollama server (or saved to disk for MLX)
@@ -232,6 +233,12 @@ This installs `mlx` and `mlx-lm`. The trainer auto-detects Apple Silicon and use
 pip install -e ".[online-rl,online-rl-mlx]"
 ```
 
+**For hosted Tinker training and inference:**
+
+```bash
+pip install -e ".[online-rl-tinker]"
+```
+
 ### Configure
 
 ```bash
@@ -264,13 +271,21 @@ The setup wizard will:
 3. Let you configure LoRA hyperparameters
 4. Write everything to `~/.hermes/config.yaml`
 
+When you choose the Tinker backend, Hermes also reconfigures the main chat runtime to use Tinker's OpenAI-compatible inference endpoint with the same selected model.
+
 ### Use
 
 ```bash
 hermes  # start chatting — feedback panel appears after each response
 ```
 
-Press `1` to upweight, `2` to downweight, `3` to skip. After 8 feedback samples, training fires automatically.
+Press `1` to reinforce, `2` to correct, `3` to skip.
+
+- In `binary` mode, `1` and `2` store scalar positive/negative feedback.
+- In `sdpo` mode, `1` and `2` still set the direction, and Hermes then asks for a short text note.
+- In SDPO mode, the button provides the polarity and the note provides the rich feedback content.
+
+Training fires automatically once enough rated samples accumulate.
 
 ### Monitor
 
@@ -305,6 +320,11 @@ After each response, a compact panel appears:
 - **Arrow keys + Enter** for navigation
 - **Ctrl+C** to skip
 
+In SDPO mode, confirming `Upweight` or `Downweight` opens a short free-text prompt:
+
+- `Upweight + note` means: this answer was good, reinforce it, and preserve the traits described in the note
+- `Downweight + note` means: this answer was bad, correct it, and use the note as the failure/correction signal
+
 ### Status Bar
 
 When online RL is active, a green `RL` indicator appears in the bottom status bar alongside the model name and context usage.
@@ -320,9 +340,11 @@ online_rl:
   enabled: true
   prompt_after_response: true
   local_only: true                    # Only activate for localhost servers
+  backend: auto                       # auto | tinker | vllm | ollama | mlx
+  algorithm: binary                   # binary | sdpo
   training_base_model: "your-model"   # HuggingFace model name or path
 
-  # MIS-PO bounds (matching Step 3.5 Flash)
+  # Binary / MIS-PO-style settings
   token_ratio_min: 0.8
   token_ratio_max: 1.25
   trajectory_ratio_min: 0.9
@@ -357,12 +379,27 @@ online_rl:
   max_saved_adapters: 4
   builtin_trainer: true
 
+  # Tinker / SDPO settings
+  tinker_base_model: ""
+  tinker_lora_rank: 32
+  tinker_loss_fn: importance_sampling
+  sdpo_teacher_mode: frozen
+  sdpo_topk: 20
+  sdpo_rl_weight: 1.0
+  sdpo_distillation_weight: 1.0
+  sdpo_text_feedback_timeout_seconds: 90
+
   # Device — auto-detects MLX on Apple Silicon, CUDA on NVIDIA, etc.
   device: auto          # auto, mlx, cuda, mps, cpu
   torch_dtype: auto     # auto, bf16, fp16, fp32 (PyTorch backend only)
 ```
 
 Environment variable overrides are available for all settings (e.g., `HERMES_ONLINE_RL_ENABLED=true`).
+
+Hermes now keeps separate default profiles for the two modes:
+
+- `binary` keeps the original scalar-reward online RL defaults
+- `sdpo` uses its own Tinker-oriented defaults, including `learning_rate=1e-6`, `tinker_lora_rank=32`, `sdpo_topk=20`, and `train_steps=0` meaning one pass over newly collected feedback
 
 ---
 
@@ -371,11 +408,11 @@ Environment variable overrides are available for all settings (e.g., `HERMES_ONL
 | File | Purpose |
 |---|---|
 | `agent/online_rl.py` | Feedback capture, backend detection, adapter publishing (vLLM/Ollama/MLX/Tinker) |
-| `agent/online_rl_trainer.py` | PyTorch MIS-PO trainer with backend routing |
-| `agent/online_rl_trainer_mlx.py` | MLX-native MIS-PO trainer for Apple Silicon |
-| `agent/online_rl_trainer_tinker.py` | Tinker API backend for hosted SOTA model training |
+| `agent/online_rl_trainer.py` | PyTorch binary/MIS-PO-style trainer with backend routing |
+| `agent/online_rl_trainer_mlx.py` | MLX-native binary/MIS-PO-style trainer for Apple Silicon |
+| `agent/online_rl_trainer_tinker.py` | Tinker API backend for hosted binary RL and SDPO-style training |
 | `cli.py` | Feedback panel UI with icons, countdown, hotkeys, RL status bar |
-| `hermes_cli/setup.py` | `setup_online_rl()` wizard with server auto-detection |
+| `hermes_cli/setup.py` | `setup_online_rl()` wizard with local and Tinker runtime configuration |
 | `hermes_cli/main.py` | `hermes online-rl` subcommands |
 | `hermes_state.py` | RL feedback SQLite schema and queries |
 | `pyproject.toml` | `[online-rl]`, `[online-rl-mlx]`, and `[online-rl-tinker]` optional dependency groups |
@@ -385,19 +422,20 @@ Environment variable overrides are available for all settings (e.g., `HERMES_ONL
 ## How It Works End-to-End
 
 1. You run `hermes` and chat normally
-2. Your local model (via vLLM/Ollama/MLX) generates a response — this is a **trajectory rollout**
+2. Hermes generates a response using either your local runtime or Tinker's OpenAI-compatible inference runtime
 3. The feedback panel appears — you press `1` (good), `2` (bad), or `3` (skip)
 4. Feedback is stored in SQLite with the full message context (prompt + response)
-5. When 8+ rated samples accumulate, `maybe_trigger_online_rl_training()` fires
-6. The trainer spawns as a background subprocess:
+5. In `sdpo` mode, Hermes also stores your short text note alongside the positive/negative label
+6. When enough rated samples accumulate, `maybe_trigger_online_rl_training()` fires
+7. The trainer spawns as a background subprocess:
    - **Auto-selects backend:** Tinker when `TINKER_API_KEY` + `tinker_base_model` are configured, otherwise MLX on Apple Silicon, PyTorch+CUDA on NVIDIA, PyTorch+MPS/CPU elsewhere
    - Loads the base model + existing LoRA adapter (if any)
-   - Computes reference logprobs (π_inference)
-   - Runs 16 MIS-PO training steps with binary filtering
+   - In `binary` mode, runs scalar-reward online RL updates
+   - In `sdpo` mode, runs a frozen-teacher SDPO approximation on Tinker with top-K distillation plus the scalar RL signal
    - Saves the updated adapter to `~/.hermes/online_rl/adapters/` or publishes the Tinker checkpoint metadata
-   - Hot-loads it into the running inference server (or saves to disk for MLX)
-7. Your next conversation uses the improved adapter
-8. The cycle repeats — your model continuously improves at your specific workflows
+   - Hot-loads it into the running inference server, saves it for MLX, or updates the active Tinker checkpoint/runtime metadata
+8. Your next conversation uses the improved adapter or Tinker checkpoint
+9. The cycle repeats — your model continuously improves at your specific workflows
 
 ---
 
@@ -421,13 +459,22 @@ Configure it with:
 - `TINKER_API_KEY`
 - `WANDB_API_KEY`
 - `online_rl.tinker_base_model`
-- `online_rl.training_backend: tinker` (or leave backend on `auto` and provide the Tinker config)
+- `online_rl.backend: tinker` (or leave backend on `auto` and provide the Tinker config)
+
+When you configure Tinker-based online RL through `hermes setup`, Hermes also:
+
+- switches the main runtime provider to `custom`
+- points `model.base_url` at `https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1`
+- sets the visible/default chat model to the selected Tinker model
+- uses the same `TINKER_API_KEY` for both training and inference
 
 ---
 
 ## References
 
 - [Step 3.5 Flash Technical Report](https://arxiv.org/abs/2602.10604) — MIS-PO algorithm
+- [Reinforcement Learning via Self-Distillation](https://arxiv.org/abs/2601.20802) — SDPO paper
+- [SDPO Reference Implementation](https://github.com/lasgroup/SDPO)
 - [Hermes Agent](https://github.com/NousResearch/hermes-agent) — Base agent framework
 - [LoRA: Low-Rank Adaptation of Large Language Models](https://arxiv.org/abs/2106.09685)
 - [Trust Region Masking](https://arxiv.org/abs/2512.23075) — Theoretical basis for sequence-level trust regions

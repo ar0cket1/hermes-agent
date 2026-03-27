@@ -199,6 +199,57 @@ def test_custom_endpoint_uses_config_api_key_over_env(monkeypatch):
     assert resolved["api_key"] == "config-api-key"
 
 
+def test_custom_tinker_endpoint_prefers_tinker_api_key(monkeypatch):
+    """Tinker OpenAI-compatible runtime should use TINKER_API_KEY first."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")
+    monkeypatch.setattr(
+        rp,
+        "_get_model_config",
+        lambda: {
+            "provider": "custom",
+            "base_url": "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1",
+        },
+    )
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.setenv("TINKER_API_KEY", "tinker-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    resolved = rp.resolve_runtime_provider(requested="custom")
+
+    assert resolved["base_url"] == "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1"
+    assert resolved["api_key"] == "tinker-key"
+
+
+def test_custom_tinker_endpoint_uses_online_rl_saved_key(monkeypatch):
+    """Tinker runtime should also use online_rl.tinker_api_key when env is absent."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")
+    monkeypatch.setattr(
+        rp,
+        "load_config",
+        lambda: {
+            "model": {
+                "provider": "custom",
+                "base_url": "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1",
+            },
+            "online_rl": {
+                "tinker_api_key": "saved-tinker-key",
+            },
+        },
+    )
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENROUTER_BASE_URL", raising=False)
+    monkeypatch.delenv("TINKER_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    resolved = rp.resolve_runtime_provider(requested="custom")
+
+    assert resolved["base_url"] == "https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1"
+    assert resolved["api_key"] == "saved-tinker-key"
+
+
 def test_custom_endpoint_uses_config_api_field_when_no_api_key(monkeypatch):
     """provider: custom with 'api' in config uses it as api_key (#1760)."""
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "openrouter")

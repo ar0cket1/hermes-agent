@@ -973,6 +973,14 @@ class SessionDB:
                 prompt_messages.append(msg)
             if assistant_message is None:
                 continue
+            metadata = feedback.get("metadata") or {}
+            feedback_text = None
+            if isinstance(metadata, dict):
+                feedback_text = (
+                    metadata.get("feedback_text")
+                    or metadata.get("sdpo_feedback_text")
+                    or metadata.get("online_rl_feedback_text")
+                )
             exports.append(
                 {
                     "feedback_id": feedback["id"],
@@ -981,7 +989,8 @@ class SessionDB:
                     "label": feedback["label"],
                     "reward": feedback["reward"],
                     "source": feedback.get("source"),
-                    "metadata": feedback.get("metadata"),
+                    "metadata": metadata,
+                    "feedback_text": feedback_text,
                     "created_at": feedback["created_at"],
                     "updated_at": feedback["updated_at"],
                     "trainable": feedback["label"] in TRAINABLE_RL_FEEDBACK_LABELS,

@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from agent.online_rl import (
+    feedback_choice_metadata,
     maybe_trigger_online_rl_training,
     resolve_online_rl_model,
     save_online_rl_state,
@@ -18,7 +19,7 @@ def _cfg(tmp_path: Path, **overrides):
         "prompt_after_response": True,
         "local_only": True,
         "backend": "vllm",
-        "algorithm": "mis_po",
+        "algorithm": "binary",
         "min_batch_size": 2,
         "max_batch_size": 8,
         "feedback_timeout_seconds": 30,
@@ -65,8 +66,40 @@ class TestSubmitOnlineRLFeedback:
             assert feedback["label"] == "no_rl"
             assert feedback["reward"] == 0.0
             assert feedback["metadata"]["interactive"] is True
-            assert feedback["metadata"]["online_rl_algorithm"] == "mis_po"
+            assert feedback["metadata"]["online_rl_algorithm"] == "binary"
             assert feedback["metadata"]["online_rl_backend"] == "vllm"
+            assert feedback["metadata"]["online_rl_feedback_mode"] == "binary"
+        finally:
+            db.close()
+
+    def test_submit_sdpo_feedback_persists_text_reward(self, tmp_path):
+        db, session_id, message_id, _ = _db_with_feedback_targets(tmp_path)
+        cfg = _cfg(
+            tmp_path,
+            algorithm="sdpo",
+            backend="tinker",
+            local_only=False,
+            min_batch_size=8,
+            tinker_base_model="moonshotai/Kimi-K2.5",
+        )
+        try:
+            feedback, queued = submit_online_rl_feedback(
+                db,
+                session_id=session_id,
+                message_id=message_id,
+                label="upweight",
+                source="cli",
+                metadata={"feedback_text": "Keep the answer concise and include the exact command."},
+                runtime_base_url="https://tinker.thinkingmachines.dev/services/tinker-prod/oai/api/v1",
+                cfg=cfg,
+            )
+            assert queued is None
+            assert feedback["metadata"]["online_rl_algorithm"] == "sdpo"
+            assert feedback["metadata"]["online_rl_feedback_mode"] == "text"
+            assert feedback["metadata"]["feedback_text"] == "Keep the answer concise and include the exact command."
+
+            exported = db.build_rl_feedback_export_rows(pending_only=False, include_neutral=True)
+            assert exported[0]["feedback_text"] == "Keep the answer concise and include the exact command."
         finally:
             db.close()
 
@@ -129,3 +162,11 @@ class TestResolveOnlineRLModel:
             adapter_name="hermes-online-rl",
             adapter_path=str(adapter_dir),
         )
+
+
+class TestFeedbackChoiceMetadata:
+    def test_sdpo_choices_expose_text_reward_hints(self):
+        choices = feedback_choice_metadata({"algorithm": "sdpo"})
+        assert choices[0]["title"] == "Reinforce + Note"
+        assert choices[0]["short_hint"] == "positive text reward"
+        assert choices[1]["title"] == "Correct + Note"

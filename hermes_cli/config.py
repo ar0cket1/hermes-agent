@@ -317,6 +317,70 @@ DEFAULT_CONFIG = {
         "api_key": "",     # API key for delegation.base_url (falls back to OPENAI_API_KEY)
     },
 
+    "online_rl": {
+        "enabled": False,
+        "prompt_after_response": False,
+        "local_only": True,
+        "backend": "auto",
+        "algorithm": "binary",  # binary | sdpo
+        "min_batch_size": 8,
+        "max_batch_size": 64,
+        "feedback_timeout_seconds": 45,
+        "export_dir": "~/.hermes/online_rl/exports",
+        "adapter_output_dir": "~/.hermes/online_rl/adapters",
+        "state_path": "~/.hermes/online_rl/state.json",
+        "trainer_command": "",
+        "builtin_trainer": True,
+        "training_base_model": "",
+        "adapter_name": "hermes-online-rl",
+        "ollama_model_name": "",
+        "ollama_command": "ollama",
+        "train_steps": 16,
+        "micro_batch_size": 1,
+        "gradient_accumulation_steps": 4,
+        "learning_rate": 2e-6,
+        "weight_decay": 0.1,
+        "warmup_steps": 20,
+        "kl_coefficient": 0.001,
+        "token_ratio_min": 0.5,
+        "token_ratio_max": 2.0,
+        "trajectory_ratio_min": 0.996,
+        "trajectory_ratio_max": 1.001,
+        "max_sequence_length": 4096,
+        "lora_rank": 16,
+        "lora_alpha": 32,
+        "lora_dropout": 0.05,
+        "target_modules": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+        "device": "auto",
+        "torch_dtype": "auto",
+        "trust_remote_code": False,
+        "max_saved_adapters": 4,
+        "tinker_base_model": "",
+        "tinker_lora_rank": 32,
+        "tinker_checkpoint_path": "",
+        "tinker_loss_fn": "importance_sampling",
+        "sdpo_teacher_mode": "frozen",
+        "sdpo_topk": 100,
+        "sdpo_rl_weight": 1.0,
+        "sdpo_distillation_weight": 1.0,
+        "sdpo_text_feedback_timeout_seconds": 90,
+        "sdpo_require_text_feedback": False,
+        "sdpo_reprompt_template": (
+            "You are revising your previous answer to the original request.\n\n"
+            "Previous answer:\n{solution}\n\n"
+            "Feedback:\n{feedback}\n\n"
+            "Write a revised answer to the original request. Keep it directly useful, "
+            "self-contained, and aligned with the feedback."
+        ),
+        "sdpo_positive_feedback_fallback": (
+            "This answer was rated positively. Preserve its structure, correctness, and style."
+        ),
+        "sdpo_negative_feedback_fallback": (
+            "This answer was rated negatively. Correct mistakes, improve alignment with the "
+            "request, and avoid repeating the same problems."
+        ),
+    },
+
     # Ephemeral prefill messages file — JSON list of {role, content} dicts
     # injected at the start of every API call for few-shot priming.
     # Never saved to sessions, logs, or trajectories.

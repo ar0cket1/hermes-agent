@@ -3465,7 +3465,7 @@ For more help on a command:
     online_rl_parser = subparsers.add_parser(
         "online-rl",
         help="Manage online RL feedback, training batches, and active adapters",
-        description="Inspect feedback queues, export batches, and run the built-in MIS-PO LoRA trainer",
+        description="Inspect feedback queues, export batches, and run the built-in online-RL trainer",
     )
     online_rl_subparsers = online_rl_parser.add_subparsers(dest="online_rl_action")
 
@@ -3484,7 +3484,7 @@ For more help on a command:
     online_rl_export.add_argument("--all", action="store_true", help="Include neutral no_rl rows")
     online_rl_export.add_argument("--limit", type=int, default=1000, help="Max rows to export")
 
-    online_rl_train = online_rl_subparsers.add_parser("train-batch", help="Run the built-in MIS-PO LoRA trainer")
+    online_rl_train = online_rl_subparsers.add_parser("train-batch", help="Run the built-in online-RL trainer")
     online_rl_train.add_argument("--export-path", default=os.getenv("HERMES_RL_EXPORT_PATH", ""), help="JSONL feedback batch path")
     online_rl_train.add_argument("--runtime-base-url", default=os.getenv("HERMES_RL_RUNTIME_BASE_URL", ""), help="Local inference base URL")
     online_rl_train.add_argument("--feedback-ids", default=os.getenv("HERMES_RL_FEEDBACK_IDS", ""), help="Comma-separated feedback ids to train")
@@ -3512,10 +3512,14 @@ For more help on a command:
             print(f"enabled:            {cfg.get('enabled')}")
             print(f"prompt_after_response: {cfg.get('prompt_after_response')}")
             print(f"algorithm:          {cfg.get('algorithm')}")
+            print(f"feedback_mode:      {'text' if cfg.get('algorithm') == 'sdpo' else 'binary'}")
             print(f"backend:            {cfg.get('backend')}")
             print(f"runtime_base_url:   {runtime_base_url}")
             print(f"training_base_model:{cfg.get('training_base_model')}")
             print(f"adapter_name:       {cfg.get('adapter_name')}")
+            if cfg.get("algorithm") == "sdpo":
+                print(f"sdpo_teacher_mode:  {cfg.get('sdpo_teacher_mode')}")
+                print(f"sdpo_topk:          {cfg.get('sdpo_topk')}")
             print(f"active_backend:     {state.get('backend', '')}")
             print(f"active_model_name:  {state.get('active_model_name', '')}")
             print(f"active_adapter_path:{state.get('active_adapter_path', '')}")

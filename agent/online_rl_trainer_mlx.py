@@ -26,6 +26,7 @@ except ImportError:
 from agent.online_rl import (
     load_online_rl_config,
     load_online_rl_state,
+    normalize_online_rl_algorithm,
     publish_online_rl_adapter,
 )
 
@@ -530,7 +531,7 @@ def train_batch(
             "adapter_dir": str(adapter_dir),
             "published_model": published_state.get("active_model_name"),
             "published_backend": published_state.get("backend"),
-            "algorithm": str(cfg.get("algorithm") or "mis_po"),
+            "algorithm": normalize_online_rl_algorithm(cfg.get("algorithm")),
         }
     )
     return stats

@@ -1,4 +1,4 @@
-"""Helpers for local online-RL feedback capture, MIS-PO training, and adapter activation."""
+"""Helpers for online-RL feedback capture, binary RL training, and SDPO activation."""
 
 from __future__ import annotations
 
@@ -22,6 +22,33 @@ from hermes_state import (
     RL_FEEDBACK_UPWEIGHT,
     is_trainable_rl_feedback_label,
     normalize_rl_feedback_label,
+)
+
+
+ONLINE_RL_ALGORITHM_BINARY = "binary"
+ONLINE_RL_ALGORITHM_SDPO = "sdpo"
+ONLINE_RL_ALGORITHM_ALIASES = {
+    "binary": ONLINE_RL_ALGORITHM_BINARY,
+    "mis_po": ONLINE_RL_ALGORITHM_BINARY,
+    "mispo": ONLINE_RL_ALGORITHM_BINARY,
+    "scalar": ONLINE_RL_ALGORITHM_BINARY,
+    "sdpo": ONLINE_RL_ALGORITHM_SDPO,
+    "self_distillation": ONLINE_RL_ALGORITHM_SDPO,
+    "self-distillation": ONLINE_RL_ALGORITHM_SDPO,
+}
+DEFAULT_SDPO_REPROMPT_TEMPLATE = (
+    "You are revising your previous answer to the original request.\n\n"
+    "Previous answer:\n{solution}\n\n"
+    "Feedback:\n{feedback}\n\n"
+    "Write a revised answer to the original request. Keep it directly useful, "
+    "self-contained, and aligned with the feedback."
+)
+DEFAULT_SDPO_POSITIVE_FEEDBACK = (
+    "This answer was rated positively. Preserve its structure, correctness, and style."
+)
+DEFAULT_SDPO_NEGATIVE_FEEDBACK = (
+    "This answer was rated negatively. Correct mistakes, improve alignment with the "
+    "request, and avoid repeating the same problems."
 )
 
 
@@ -50,6 +77,15 @@ def _safe_float(value: Any, default: float) -> float:
         return default
 
 
+def normalize_online_rl_algorithm(value: Any, *, default: str = ONLINE_RL_ALGORITHM_BINARY) -> str:
+    """Normalize an online-RL algorithm/mode name to a stable internal identifier."""
+    raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+    normalized = ONLINE_RL_ALGORITHM_ALIASES.get(raw, raw)
+    if normalized in {ONLINE_RL_ALGORITHM_BINARY, ONLINE_RL_ALGORITHM_SDPO}:
+        return normalized
+    return default
+
+
 def _normalize_server_root(base_url: Optional[str]) -> str:
     raw = str(base_url or "").strip()
     if not raw:
@@ -71,6 +107,12 @@ def is_local_base_url(base_url: Optional[str]) -> bool:
     return host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
 
 
+def online_rl_uses_text_feedback(cfg: Optional[Dict[str, Any]] = None) -> bool:
+    """Return True when the active online-RL mode expects rich textual feedback."""
+    cfg = cfg or load_online_rl_config()
+    return normalize_online_rl_algorithm(cfg.get("algorithm")) == ONLINE_RL_ALGORITHM_SDPO
+
+
 def load_online_rl_config() -> Dict[str, Any]:
     """Load merged online-RL config from config.yaml plus env overrides."""
     from hermes_cli.config import get_hermes_home, load_config
@@ -87,7 +129,9 @@ def load_online_rl_config() -> Dict[str, Any]:
         "prompt_after_response": bool(cfg.get("prompt_after_response", False)),
         "local_only": bool(cfg.get("local_only", True)),
         "backend": str(cfg.get("backend") or "auto").strip().lower(),
-        "algorithm": str(cfg.get("algorithm") or "mis_po").strip().lower(),
+        "algorithm": normalize_online_rl_algorithm(
+            cfg.get("algorithm") or ONLINE_RL_ALGORITHM_BINARY
+        ),
         "min_batch_size": _safe_int(cfg.get("min_batch_size", 8), 8),
         "max_batch_size": _safe_int(cfg.get("max_batch_size", 64), 64),
         "feedback_timeout_seconds": _safe_int(cfg.get("feedback_timeout_seconds", 45), 45),
@@ -130,6 +174,28 @@ def load_online_rl_config() -> Dict[str, Any]:
         "tinker_lora_rank": _safe_int(cfg.get("tinker_lora_rank", 32), 32),
         "tinker_checkpoint_path": str(cfg.get("tinker_checkpoint_path") or "").strip(),
         "tinker_loss_fn": str(cfg.get("tinker_loss_fn") or "importance_sampling").strip().lower(),
+        # SDPO settings
+        "sdpo_teacher_mode": str(cfg.get("sdpo_teacher_mode") or "frozen").strip().lower() or "frozen",
+        "sdpo_topk": _safe_int(cfg.get("sdpo_topk", 100), 100),
+        "sdpo_rl_weight": _safe_float(cfg.get("sdpo_rl_weight", 1.0), 1.0),
+        "sdpo_distillation_weight": _safe_float(cfg.get("sdpo_distillation_weight", 1.0), 1.0),
+        "sdpo_text_feedback_timeout_seconds": _safe_int(
+            cfg.get("sdpo_text_feedback_timeout_seconds", 90),
+            90,
+        ),
+        "sdpo_require_text_feedback": bool(cfg.get("sdpo_require_text_feedback", False)),
+        "sdpo_reprompt_template": str(
+            cfg.get("sdpo_reprompt_template") or DEFAULT_SDPO_REPROMPT_TEMPLATE
+        ).strip()
+        or DEFAULT_SDPO_REPROMPT_TEMPLATE,
+        "sdpo_positive_feedback_fallback": str(
+            cfg.get("sdpo_positive_feedback_fallback") or DEFAULT_SDPO_POSITIVE_FEEDBACK
+        ).strip()
+        or DEFAULT_SDPO_POSITIVE_FEEDBACK,
+        "sdpo_negative_feedback_fallback": str(
+            cfg.get("sdpo_negative_feedback_fallback") or DEFAULT_SDPO_NEGATIVE_FEEDBACK
+        ).strip()
+        or DEFAULT_SDPO_NEGATIVE_FEEDBACK,
     }
 
     result["enabled"] = _env_bool("HERMES_ONLINE_RL_ENABLED", result["enabled"])
@@ -140,7 +206,9 @@ def load_online_rl_config() -> Dict[str, Any]:
     result["local_only"] = _env_bool("HERMES_ONLINE_RL_LOCAL_ONLY", result["local_only"])
     result["builtin_trainer"] = _env_bool("HERMES_ONLINE_RL_BUILTIN_TRAINER", result["builtin_trainer"])
     result["backend"] = os.getenv("HERMES_ONLINE_RL_BACKEND", result["backend"]).strip().lower() or "auto"
-    result["algorithm"] = os.getenv("HERMES_ONLINE_RL_ALGORITHM", result["algorithm"]).strip().lower() or "mis_po"
+    result["algorithm"] = normalize_online_rl_algorithm(
+        os.getenv("HERMES_ONLINE_RL_ALGORITHM", result["algorithm"])
+    )
     result["min_batch_size"] = _safe_int(os.getenv("HERMES_ONLINE_RL_MIN_BATCH_SIZE"), result["min_batch_size"])
     result["max_batch_size"] = _safe_int(os.getenv("HERMES_ONLINE_RL_MAX_BATCH_SIZE"), result["max_batch_size"])
     result["feedback_timeout_seconds"] = _safe_int(
@@ -187,6 +255,42 @@ def load_online_rl_config() -> Dict[str, Any]:
     result["tinker_lora_rank"] = _safe_int(
         os.getenv("HERMES_ONLINE_RL_TINKER_LORA_RANK"), result["tinker_lora_rank"]
     )
+    result["sdpo_teacher_mode"] = os.getenv(
+        "HERMES_ONLINE_RL_SDPO_TEACHER_MODE",
+        result["sdpo_teacher_mode"],
+    ).strip().lower() or "frozen"
+    result["sdpo_topk"] = _safe_int(
+        os.getenv("HERMES_ONLINE_RL_SDPO_TOPK"),
+        result["sdpo_topk"],
+    )
+    result["sdpo_rl_weight"] = _safe_float(
+        os.getenv("HERMES_ONLINE_RL_SDPO_RL_WEIGHT"),
+        result["sdpo_rl_weight"],
+    )
+    result["sdpo_distillation_weight"] = _safe_float(
+        os.getenv("HERMES_ONLINE_RL_SDPO_DISTILLATION_WEIGHT"),
+        result["sdpo_distillation_weight"],
+    )
+    result["sdpo_text_feedback_timeout_seconds"] = _safe_int(
+        os.getenv("HERMES_ONLINE_RL_SDPO_TEXT_FEEDBACK_TIMEOUT_SECONDS"),
+        result["sdpo_text_feedback_timeout_seconds"],
+    )
+    result["sdpo_require_text_feedback"] = _env_bool(
+        "HERMES_ONLINE_RL_SDPO_REQUIRE_TEXT_FEEDBACK",
+        result["sdpo_require_text_feedback"],
+    )
+    result["sdpo_reprompt_template"] = os.getenv(
+        "HERMES_ONLINE_RL_SDPO_REPROMPT_TEMPLATE",
+        result["sdpo_reprompt_template"],
+    ).strip() or DEFAULT_SDPO_REPROMPT_TEMPLATE
+    result["sdpo_positive_feedback_fallback"] = os.getenv(
+        "HERMES_ONLINE_RL_SDPO_POSITIVE_FEEDBACK_FALLBACK",
+        result["sdpo_positive_feedback_fallback"],
+    ).strip() or DEFAULT_SDPO_POSITIVE_FEEDBACK
+    result["sdpo_negative_feedback_fallback"] = os.getenv(
+        "HERMES_ONLINE_RL_SDPO_NEGATIVE_FEEDBACK_FALLBACK",
+        result["sdpo_negative_feedback_fallback"],
+    ).strip() or DEFAULT_SDPO_NEGATIVE_FEEDBACK
     return result
 
 
@@ -376,7 +480,8 @@ def publish_online_rl_adapter(
         # For Tinker, adapter_path is the tinker:// checkpoint URI
         state.update(
             {
-                "algorithm": str(cfg.get("algorithm") or "mis_po"),
+                "algorithm": normalize_online_rl_algorithm(cfg.get("algorithm")),
+                "feedback_mode": "text" if online_rl_uses_text_feedback(cfg) else "binary",
                 "backend": "tinker",
                 "active_model_name": active_model_name,
                 "active_adapter_path": str(adapter_path),
@@ -389,7 +494,8 @@ def publish_online_rl_adapter(
     else:
         state.update(
             {
-                "algorithm": str(cfg.get("algorithm") or "mis_po"),
+                "algorithm": normalize_online_rl_algorithm(cfg.get("algorithm")),
+                "feedback_mode": "text" if online_rl_uses_text_feedback(cfg) else "binary",
                 "backend": backend or "mlx",
                 "active_model_name": active_model_name,
                 "active_adapter_path": str(Path(adapter_path).expanduser()),
@@ -560,7 +666,7 @@ def maybe_trigger_online_rl_training(
         "batch_size": len(rows),
         "export_path": str(export_path),
         "feedback_ids": feedback_ids,
-        "algorithm": str(cfg.get("algorithm") or "mis_po"),
+        "algorithm": normalize_online_rl_algorithm(cfg.get("algorithm")),
     }
 
 
@@ -581,10 +687,14 @@ def submit_online_rl_feedback(
 
     runtime_state = load_online_rl_state(cfg)
     merged_metadata = dict(metadata or {})
-    merged_metadata.setdefault("online_rl_algorithm", str(cfg.get("algorithm") or "mis_po"))
+    merged_metadata.setdefault("online_rl_algorithm", normalize_online_rl_algorithm(cfg.get("algorithm")))
     merged_metadata.setdefault(
         "online_rl_backend",
         resolve_online_rl_backend(runtime_base_url=runtime_base_url, cfg=cfg),
+    )
+    merged_metadata.setdefault(
+        "online_rl_feedback_mode",
+        "text" if online_rl_uses_text_feedback(cfg) else "binary",
     )
     if runtime_state.get("active_model_name"):
         merged_metadata.setdefault("online_rl_model_name", runtime_state.get("active_model_name"))
@@ -609,26 +719,54 @@ def submit_online_rl_feedback(
     return feedback, queued
 
 
-def feedback_choice_metadata() -> list[Dict[str, Any]]:
+def feedback_choice_metadata(cfg: Optional[Dict[str, Any]] = None) -> list[Dict[str, Any]]:
     """Return stable frontend metadata for the supported feedback labels."""
+    cfg = cfg or load_online_rl_config()
+    algorithm = normalize_online_rl_algorithm(cfg.get("algorithm"))
+    if algorithm == ONLINE_RL_ALGORITHM_SDPO:
+        return [
+            {
+                "label": RL_FEEDBACK_UPWEIGHT,
+                "title": "Reinforce + Note",
+                "reward": 1.0,
+                "short_hint": "positive text reward",
+                "description": "Positive reward plus a short text note for frozen-teacher SDPO.",
+            },
+            {
+                "label": RL_FEEDBACK_DOWNWEIGHT,
+                "title": "Correct + Note",
+                "reward": -1.0,
+                "short_hint": "revision text reward",
+                "description": "Negative reward plus a revision note for frozen-teacher SDPO.",
+            },
+            {
+                "label": RL_FEEDBACK_NO_RL,
+                "title": "Skip",
+                "reward": 0.0,
+                "short_hint": "no training",
+                "description": "Store no trainable reward for this turn.",
+            },
+        ]
     return [
         {
             "label": RL_FEEDBACK_UPWEIGHT,
-            "title": "RL upweight",
+            "title": "RL Upweight",
             "reward": 1.0,
+            "short_hint": "learn from this",
             "description": "Positive binary reward for the full assistant trajectory.",
         },
         {
             "label": RL_FEEDBACK_DOWNWEIGHT,
-            "title": "RL downweight",
+            "title": "RL Downweight",
             "reward": -1.0,
+            "short_hint": "unlearn this",
             "description": "Negative binary reward for the full assistant trajectory.",
         },
         {
             "label": RL_FEEDBACK_NO_RL,
             "title": "No RL",
             "reward": 0.0,
+            "short_hint": "no training",
             "description": "Store no trainable reward for this turn.",
         },
     ]
-

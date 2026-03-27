@@ -430,7 +430,13 @@ def _curses_prompt_choice(question: str, choices: list, default: int = 0) -> int
 
 
 
-def prompt_choice(question: str, choices: list, default: int = 0) -> int:
+def prompt_choice(
+    question: str,
+    choices: list,
+    default: int = 0,
+    *,
+    treat_default_as_skip: bool = True,
+) -> int:
     """Prompt for a choice from a list with arrow key navigation.
 
     Escape keeps the current default (skips the question).
@@ -438,7 +444,7 @@ def prompt_choice(question: str, choices: list, default: int = 0) -> int:
     """
     idx = _curses_prompt_choice(question, choices, default)
     if idx >= 0:
-        if idx == default:
+        if treat_default_as_skip and idx == default:
             print_info("  Skipped (keeping current)")
             print()
             return default
@@ -3123,8 +3129,51 @@ def _detect_local_servers() -> list[dict]:
     return found
 
 
+def _configure_primary_runtime_for_tinker(
+    config: dict,
+    *,
+    model_name: str,
+    api_key: str,
+) -> None:
+    """Point the main Hermes runtime at Tinker's OpenAI-compatible endpoint."""
+    from agent.online_rl import TINKER_OAI_BASE_URL
+    from hermes_cli.auth import deactivate_provider
+    from hermes_cli.config import save_env_value
+
+    if api_key:
+        save_env_value("TINKER_API_KEY", api_key)
+
+    # Clear any stale OAuth/provider override so config-backed custom runtime wins.
+    try:
+        deactivate_provider()
+    except Exception:
+        pass
+
+    model_cfg = config.get("model")
+    if isinstance(model_cfg, dict):
+        updated_model_cfg = dict(model_cfg)
+    elif isinstance(model_cfg, str) and model_cfg.strip():
+        updated_model_cfg = {"default": model_cfg.strip()}
+    else:
+        updated_model_cfg = {}
+
+    updated_model_cfg["provider"] = "custom"
+    updated_model_cfg["base_url"] = TINKER_OAI_BASE_URL
+    updated_model_cfg["default"] = model_name
+    updated_model_cfg["api_mode"] = "chat_completions"
+    config["model"] = updated_model_cfg
+
+
 def _setup_online_rl_tinker(config: dict, rl_config: dict):
     """Interactive setup for online RL via the Tinker API."""
+    reconfigure_existing = bool(rl_config)
+    sdpo_default_rank = 32
+    sdpo_default_learning_rate = 1e-6
+    sdpo_default_min_batch = 4
+    sdpo_default_topk = 20
+    sdpo_default_train_steps = 0
+    sdpo_default_grad_accum = 4
+
     # Check tinker dependency
     if importlib.util.find_spec("tinker") is None:
         print_warning("Missing Python package: tinker")
@@ -3167,33 +3216,83 @@ def _setup_online_rl_tinker(config: dict, rl_config: dict):
     else:
         tinker_model = current_model
 
-    # Step 3: Feedback prompt toggle
+    # Step 3: Training mode
+    print()
+    current_algorithm = str(rl_config.get("algorithm") or "binary").strip().lower()
+    mode_choices = [
+        "SDPO — high performance / high cost with text-based rewards",
+        "Binary (MISPO-style) — lower cost scalar rewards on the full response",
+    ]
+    default_mode_idx = 0 if current_algorithm == "sdpo" else 1
+    mode_idx = prompt_choice("Which online RL mode do you want?", mode_choices, default_mode_idx)
+    algorithm = "sdpo" if mode_idx == 0 else "binary"
+
+    # Step 4: Feedback prompt toggle
     print()
     current_prompt = rl_config.get("prompt_after_response", False)
     show_feedback = prompt_yes_no(
-        "Show feedback buttons after each response? (upweight / downweight / skip)",
+        (
+            "Show feedback panel after each response? "
+            "(label + text note for SDPO, label only for binary)"
+        ),
         default=current_prompt if isinstance(current_prompt, bool) else True,
     )
 
-    # Step 4: LoRA and training defaults
+    # Step 5: LoRA and training defaults
     print()
     print_header("Tinker Training Hyperparameters")
-    current_rank = rl_config.get("tinker_lora_rank", 32)
-    current_lr = rl_config.get("learning_rate", 2e-6)
-    current_batch = rl_config.get("min_batch_size", 8)
+    current_rank = rl_config.get(
+        "tinker_lora_rank",
+        sdpo_default_rank if algorithm == "sdpo" else 32,
+    )
+    current_lr = rl_config.get(
+        "learning_rate",
+        sdpo_default_learning_rate if algorithm == "sdpo" else 2e-6,
+    )
+    current_batch = rl_config.get(
+        "min_batch_size",
+        sdpo_default_min_batch if algorithm == "sdpo" else 8,
+    )
     current_loss = rl_config.get("tinker_loss_fn", "importance_sampling")
+    current_topk = rl_config.get("sdpo_topk", sdpo_default_topk)
+    current_train_steps = rl_config.get(
+        "train_steps",
+        sdpo_default_train_steps if algorithm == "sdpo" else 16,
+    )
+    current_grad_accum = rl_config.get(
+        "gradient_accumulation_steps",
+        sdpo_default_grad_accum if algorithm == "sdpo" else 4,
+    )
+    default_rank = sdpo_default_rank if algorithm == "sdpo" else current_rank
+    default_lr = sdpo_default_learning_rate if algorithm == "sdpo" else current_lr
+    default_batch = sdpo_default_min_batch if algorithm == "sdpo" else current_batch
+    default_topk = sdpo_default_topk if algorithm == "sdpo" else current_topk
+    default_train_steps = sdpo_default_train_steps if algorithm == "sdpo" else current_train_steps
+    default_grad_accum = sdpo_default_grad_accum if algorithm == "sdpo" else current_grad_accum
 
-    print_info(f"  LoRA rank: {current_rank}")
-    print_info(f"  Learning rate: {current_lr}")
-    print_info(f"  Min batch size: {current_batch}")
-    print_info(f"  Loss function: {current_loss}")
+    print_info(f"  LoRA rank: {default_rank}")
+    print_info(f"  Learning rate: {default_lr}")
+    print_info(f"  Min batch size: {default_batch}")
+    if algorithm == "sdpo":
+        print_info("  Teacher mode: frozen")
+        print_info(f"  Distillation top-K: {default_topk}")
+        if int(default_train_steps) <= 0:
+            print_info("  Train steps: auto (one pass over collected feedback)")
+        else:
+            print_info(f"  Train steps: {default_train_steps}")
+        print_info(f"  Grad accumulation: {default_grad_accum}")
+    else:
+        print_info(f"  Loss function: {current_loss}")
     print()
 
-    if prompt_yes_no("Use these defaults?", True):
-        lora_rank = current_rank
-        learning_rate = current_lr
-        min_batch = current_batch
+    if prompt_yes_no("Use these defaults?", False if reconfigure_existing else True):
+        lora_rank = default_rank
+        learning_rate = default_lr
+        min_batch = default_batch
         loss_fn = current_loss
+        sdpo_topk = default_topk
+        train_steps = default_train_steps
+        grad_accum = default_grad_accum
     else:
         rank_str = prompt("LoRA rank (16, 32, 64)", default=str(current_rank))
         try:
@@ -3210,41 +3309,99 @@ def _setup_online_rl_tinker(config: dict, rl_config: dict):
             min_batch = int(batch_str)
         except ValueError:
             min_batch = current_batch
-        loss_choices = ["importance_sampling", "cispo", "ppo"]
-        loss_idx = prompt_choice("Loss function for RL training:", loss_choices, 0)
-        loss_fn = loss_choices[loss_idx]
+        if algorithm == "sdpo":
+            topk_str = prompt("Distillation top-K (32, 64, 100)", default=str(current_topk))
+            try:
+                sdpo_topk = int(topk_str)
+            except ValueError:
+                sdpo_topk = current_topk
+            steps_str = prompt(
+                "Train steps (0 = one pass over newly collected feedback)",
+                default=str(current_train_steps),
+            )
+            try:
+                train_steps = int(steps_str)
+            except ValueError:
+                train_steps = current_train_steps
+            accum_str = prompt(
+                "Gradient accumulation steps",
+                default=str(current_grad_accum),
+            )
+            try:
+                grad_accum = max(1, int(accum_str))
+            except ValueError:
+                grad_accum = current_grad_accum
+            loss_fn = "importance_sampling"
+        else:
+            loss_choices = ["importance_sampling", "cispo", "ppo"]
+            loss_idx = prompt_choice("Loss function for RL training:", loss_choices, 0)
+            loss_fn = loss_choices[loss_idx]
+            sdpo_topk = current_topk
+            train_steps = rl_config.get("train_steps", 16)
+            grad_accum = rl_config.get("gradient_accumulation_steps", 4)
 
-    # Step 5: Summary
+    # Step 6: Summary
     print()
     print_header("Tinker Online RL Configuration Summary")
     print_info(f"  Backend:         Tinker API (remote)")
     print_info(f"  Model:           {tinker_model}")
+    print_info(
+        f"  Mode:            "
+        f"{'SDPO (frozen teacher + text rewards)' if algorithm == 'sdpo' else 'Binary / MISPO-style scalar rewards'}"
+    )
     print_info(f"  API key:         {'***' + current_key[-4:] if len(current_key) > 4 else '(not set)'}")
     print_info(f"  Show feedback:   {'Yes' if show_feedback else 'No'}")
     print_info(f"  LoRA rank:       {lora_rank}")
     print_info(f"  Learning rate:   {learning_rate}")
-    print_info(f"  Loss function:   {loss_fn}")
     print_info(f"  Min batch size:  {min_batch}")
+    print_info(f"  Hermes runtime:  Tinker inference on {tinker_model}")
+    if algorithm == "sdpo":
+        print_info("  Teacher mode:    frozen")
+        print_info(f"  Distill top-K:   {sdpo_topk}")
+        if int(train_steps) <= 0:
+            print_info("  Train steps:     auto (one pass over collected feedback)")
+        else:
+            print_info(f"  Train steps:     {train_steps}")
+        print_info(f"  Grad accumulation: {grad_accum}")
+    else:
+        print_info(f"  Loss function:   {loss_fn}")
     print()
 
     if prompt_yes_no("Save this configuration?", True):
         rl_config["enabled"] = True
         rl_config["backend"] = "tinker"
         rl_config["local_only"] = False
+        rl_config["algorithm"] = algorithm
         rl_config["prompt_after_response"] = show_feedback
         rl_config["tinker_base_model"] = tinker_model
         rl_config["training_base_model"] = tinker_model
         rl_config["tinker_lora_rank"] = lora_rank
-        rl_config["tinker_loss_fn"] = loss_fn
         rl_config["learning_rate"] = learning_rate
         rl_config["min_batch_size"] = min_batch
         rl_config["builtin_trainer"] = True
+        if algorithm == "sdpo":
+            rl_config["tinker_loss_fn"] = "importance_sampling"
+            rl_config["sdpo_teacher_mode"] = "frozen"
+            rl_config["sdpo_topk"] = sdpo_topk
+            rl_config["train_steps"] = train_steps
+            rl_config["gradient_accumulation_steps"] = grad_accum
+            rl_config["warmup_steps"] = 0
+        else:
+            rl_config["tinker_loss_fn"] = loss_fn
         if current_key:
             rl_config["tinker_api_key"] = current_key
         config["online_rl"] = rl_config
+        _configure_primary_runtime_for_tinker(
+            config,
+            model_name=tinker_model,
+            api_key=current_key,
+        )
 
         print_success("Tinker Online RL enabled!")
         print_info(f"  Training will run remotely on {tinker_model} via Tinker API.")
+        print_info("  Hermes chat inference is now routed through Tinker's OpenAI-compatible API.")
+        if algorithm == "sdpo":
+            print_info("  Hermes will ask for a short text reward after up/down feedback.")
         print_info("  Disable anytime: hermes config set online_rl.enabled false")
         if not current_key:
             print_warning("  Remember to set TINKER_API_KEY before training.")
@@ -3255,12 +3412,53 @@ def _setup_online_rl_tinker(config: dict, rl_config: dict):
 def setup_online_rl(config: dict):
     """Interactive setup for online RL with LoRA adapters."""
     rl_config = config.get("online_rl") or {}
+    existing_online_rl = bool(rl_config)
 
     print()
     print_header("Online RL Setup")
     print_info("Train a LoRA adapter from your feedback as you use Hermes.")
     print_info("Works with local models (vLLM, Ollama, etc.) or remote SOTA models via Tinker API.")
     print()
+
+    if existing_online_rl:
+        current_backend = str(
+            rl_config.get("backend") or ("tinker" if rl_config.get("tinker_base_model") else "local")
+        ).strip()
+        current_algorithm = str(rl_config.get("algorithm") or "binary").strip().lower()
+        current_target = (
+            rl_config.get("tinker_base_model")
+            or rl_config.get("training_base_model")
+            or rl_config.get("model_base_url")
+            or "(not set)"
+        )
+
+        print_header("Current Online RL Configuration")
+        print_info(f"  Enabled:         {'Yes' if rl_config.get('enabled') else 'No'}")
+        print_info(f"  Backend:         {current_backend}")
+        print_info(f"  Mode:            {current_algorithm}")
+        print_info(f"  Model / target:  {current_target}")
+        print_info(f"  Feedback panel:  {'Yes' if rl_config.get('prompt_after_response') else 'No'}")
+        print()
+
+        action_idx = prompt_choice(
+            "What would you like to do?",
+            [
+                "Reconfigure current Online RL settings",
+                "Disable Online RL",
+                "Keep current settings",
+            ],
+            0,
+            treat_default_as_skip=False,
+        )
+        if action_idx == 1:
+            rl_config["enabled"] = False
+            rl_config["prompt_after_response"] = False
+            config["online_rl"] = rl_config
+            print_success("Online RL disabled.")
+            return
+        if action_idx == 2:
+            print_info("Keeping current Online RL settings.")
+            return
 
     # Step 0: Choose backend type
     backend_choices = [
@@ -3382,7 +3580,7 @@ def setup_online_rl(config: dict):
     print_info(f"  Min batch size: {current_batch}  (training triggers after this many feedback samples)")
     print()
 
-    if prompt_yes_no("Use these defaults?", True):
+    if prompt_yes_no("Use these defaults?", False if existing_online_rl else True):
         lora_rank = current_rank
         learning_rate = current_lr
         min_batch = current_batch
@@ -3416,6 +3614,7 @@ def setup_online_rl(config: dict):
 
     if prompt_yes_no("Save this configuration?", True):
         rl_config["enabled"] = True
+        rl_config["algorithm"] = "binary"
         rl_config["prompt_after_response"] = show_feedback
         rl_config["local_only"] = True
         rl_config["training_base_model"] = training_model
@@ -3577,10 +3776,24 @@ def run_setup_wizard(args):
             "---",
             "Exit",
         ]
+        section_choice_map = {
+            3: setup_model_provider,
+            4: setup_terminal_backend,
+            5: setup_gateway,
+            6: setup_tools,
+            7: setup_agent_settings,
+            8: setup_online_rl,
+        }
 
         # Separator indices (not selectable, but prompt_choice doesn't filter them,
         # so we handle them below)
-        choice = prompt_choice("What would you like to do?", menu_choices, 0)
+        default_choice = 8 if config.get("online_rl") else 0
+        choice = prompt_choice(
+            "What would you like to do?",
+            menu_choices,
+            default_choice,
+            treat_default_as_skip=False,
+        )
 
         if choice == 0:
             # Quick setup
@@ -3596,10 +3809,17 @@ def run_setup_wizard(args):
         elif choice == 10:
             print_info("Exiting. Run 'hermes setup' again when ready.")
             return
-        elif 3 <= choice <= 8:
+        elif choice in section_choice_map:
             # Individual section
-            section_idx = choice - 3
-            _, label, func = SETUP_SECTIONS[section_idx]
+            func = section_choice_map[choice]
+            _, label, _ = next(
+                (
+                    (section_key, section_label, section_func)
+                    for section_key, section_label, section_func in SETUP_SECTIONS
+                    if section_func is func
+                ),
+                ("", "Setup", func),
+            )
             func(config)
             save_config(config)
             _print_setup_summary(config, hermes_home)
@@ -3687,6 +3907,14 @@ def _run_quick_setup(config: dict, hermes_home):
     if not has_anything_missing:
         print_success("Everything is configured! Nothing to do.")
         print()
+        if config.get("online_rl") and prompt_yes_no(
+            "Online RL is already configured. Reconfigure it now?",
+            False,
+        ):
+            setup_online_rl(config)
+            save_config(config)
+            _print_setup_summary(config, hermes_home)
+            return
         print_info("Run 'hermes setup' and choose 'Full Setup' to reconfigure,")
         print_info("or pick a specific section from the menu.")
         return

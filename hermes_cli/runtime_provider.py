@@ -37,6 +37,11 @@ def _detect_api_mode_for_url(base_url: str) -> Optional[str]:
     return None
 
 
+def _is_tinker_oai_url(base_url: str) -> bool:
+    normalized = (base_url or "").strip().lower().rstrip("/")
+    return "tinker.thinkingmachines.dev" in normalized and "/oai/api/v1" in normalized
+
+
 def _auto_detect_local_model(base_url: str) -> str:
     """Query a local server for its model name when only one model is loaded."""
     if not base_url:
@@ -266,9 +271,20 @@ def _resolve_openrouter_runtime(
         ]
     else:
         # Custom endpoint: use api_key from config when using config base_url (#1760).
+        extra_custom_candidates = []
+        if _is_tinker_oai_url(base_url):
+            root_cfg = load_config()
+            online_rl_cfg = root_cfg.get("online_rl") if isinstance(root_cfg, dict) else {}
+            extra_custom_candidates.extend(
+                [
+                    os.getenv("TINKER_API_KEY"),
+                    str((online_rl_cfg or {}).get("tinker_api_key") or "").strip(),
+                ]
+            )
         api_key_candidates = [
             explicit_api_key,
             (cfg_api_key if use_config_base_url else ""),
+            *extra_custom_candidates,
             os.getenv("OPENAI_API_KEY"),
             os.getenv("OPENROUTER_API_KEY"),
         ]

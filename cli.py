@@ -252,7 +252,7 @@ def load_cli_config() -> Dict[str, Any]:
             "prompt_after_response": False,
             "local_only": True,
             "backend": "auto",
-            "algorithm": "mis_po",
+            "algorithm": "binary",
             "min_batch_size": 8,
             "max_batch_size": 64,
             "feedback_timeout_seconds": 45,
@@ -285,6 +285,30 @@ def load_cli_config() -> Dict[str, Any]:
             "torch_dtype": "auto",
             "trust_remote_code": False,
             "max_saved_adapters": 4,
+            "tinker_base_model": "",
+            "tinker_lora_rank": 32,
+            "tinker_checkpoint_path": "",
+            "tinker_loss_fn": "importance_sampling",
+            "sdpo_teacher_mode": "frozen",
+            "sdpo_topk": 100,
+            "sdpo_rl_weight": 1.0,
+            "sdpo_distillation_weight": 1.0,
+            "sdpo_text_feedback_timeout_seconds": 90,
+            "sdpo_require_text_feedback": False,
+            "sdpo_reprompt_template": (
+                "You are revising your previous answer to the original request.\n\n"
+                "Previous answer:\n{solution}\n\n"
+                "Feedback:\n{feedback}\n\n"
+                "Write a revised answer to the original request. Keep it directly useful, "
+                "self-contained, and aligned with the feedback."
+            ),
+            "sdpo_positive_feedback_fallback": (
+                "This answer was rated positively. Preserve its structure, correctness, and style."
+            ),
+            "sdpo_negative_feedback_fallback": (
+                "This answer was rated negatively. Correct mistakes, improve alignment with the "
+                "request, and avoid repeating the same problems."
+            ),
         },
     }
     
@@ -5505,6 +5529,7 @@ class HermesCLI:
         session_id: str,
         message_id: int,
         label: str,
+        feedback_text: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """Persist the selected label and maybe queue a local trainer batch."""
         if not self._session_db or not self.agent:
@@ -5512,16 +5537,22 @@ class HermesCLI:
         try:
             from agent.online_rl import submit_online_rl_feedback
 
+            feedback_metadata = {
+                "interactive": True,
+                "session_id": session_id,
+            }
+            if feedback_text:
+                feedback_metadata["feedback_text"] = feedback_text
+                feedback_metadata["online_rl_feedback_text"] = feedback_text
+                feedback_metadata["sdpo_feedback_text"] = feedback_text
+
             feedback, queued = submit_online_rl_feedback(
                 self._session_db,
                 session_id=session_id,
                 message_id=message_id,
                 label=label,
                 source="cli",
-                metadata={
-                    "interactive": True,
-                    "session_id": session_id,
-                },
+                metadata=feedback_metadata,
                 runtime_base_url=getattr(self.agent, "base_url", None) or self.base_url,
             )
         except Exception as e:
@@ -5544,6 +5575,56 @@ class HermesCLI:
             "queued": queued,
         }
 
+    def _prompt_for_inline_text_input(
+        self,
+        *,
+        title: str,
+        question: str,
+        placeholder: str,
+        timeout: int,
+        hint_text: str,
+        allow_empty: bool = False,
+        cancel_value: str = "",
+    ) -> str:
+        """Open an inline freetext prompt using the clarify UI machinery."""
+        response_queue = queue.Queue()
+        self._clarify_state = {
+            "title": title,
+            "question": question,
+            "choices": [],
+            "selected": 0,
+            "response_queue": response_queue,
+            "placeholder": placeholder,
+            "hint_text": hint_text,
+            "allow_empty": bool(allow_empty),
+            "cancel_value": cancel_value,
+        }
+        self._clarify_deadline = time.monotonic() + max(5, int(timeout))
+        self._clarify_freetext = True
+        self._invalidate(min_interval=0.0)
+
+        last_countdown_refresh = time.monotonic()
+        while True:
+            try:
+                result = response_queue.get(timeout=1)
+                self._clarify_deadline = 0
+                return str(result or "")
+            except queue.Empty:
+                remaining = self._clarify_deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                now = time.monotonic()
+                if now - last_countdown_refresh >= 5.0:
+                    last_countdown_refresh = now
+                    self._invalidate(min_interval=0.0)
+
+        self._clarify_state = None
+        self._clarify_freetext = False
+        self._clarify_deadline = 0
+        self._clear_current_input()
+        self._invalidate(min_interval=0.0)
+        return cancel_value
+
     def _prompt_for_online_rl_feedback(self, response_text: str) -> Optional[Dict[str, Any]]:
         """Show the inline RL selector after a response and persist the chosen label."""
         if not self._should_prompt_online_rl_feedback():
@@ -5554,12 +5635,18 @@ class HermesCLI:
             return None
 
         try:
-            from agent.online_rl import feedback_choice_metadata, load_online_rl_config
+            from agent.online_rl import (
+                feedback_choice_metadata,
+                load_online_rl_config,
+                normalize_online_rl_algorithm,
+                online_rl_uses_text_feedback,
+            )
         except Exception:
             return None
 
+        cfg = load_online_rl_config()
         existing = self._session_db.get_rl_feedback(message_id=target["message_id"])
-        choices = feedback_choice_metadata()
+        choices = feedback_choice_metadata(cfg)
         default_label = (existing or {}).get("label") or "no_rl"
         selected = 0
         for idx, choice in enumerate(choices):
@@ -5567,7 +5654,8 @@ class HermesCLI:
                 selected = idx
                 break
 
-        cfg = load_online_rl_config()
+        algorithm = normalize_online_rl_algorithm(cfg.get("algorithm"))
+        uses_text_feedback = online_rl_uses_text_feedback(cfg)
         timeout = max(5, int(cfg.get("feedback_timeout_seconds", 45)))
         response_queue = queue.Queue()
         self._rl_feedback_state = {
@@ -5577,6 +5665,17 @@ class HermesCLI:
             "selected": selected,
             "response_queue": response_queue,
             "response_preview": (response_text or "")[:240].strip(),
+            "panel_title": "Online RL · SDPO" if algorithm == "sdpo" else "Online RL · Binary",
+            "panel_subtitle": (
+                "Frozen-teacher distillation with a short text reward"
+                if uses_text_feedback
+                else "Fast scalar reward on the full assistant trajectory"
+            ),
+            "hint_line": (
+                "↑/↓ navigate  Enter confirm  1/2/3 quick-select  text note follows"
+                if uses_text_feedback
+                else "↑/↓ navigate  Enter confirm  1/2/3 quick-select"
+            ),
         }
         self._rl_feedback_deadline = time.monotonic() + timeout
         self._invalidate(min_interval=0.0)
@@ -5586,10 +5685,25 @@ class HermesCLI:
             try:
                 label = response_queue.get(timeout=1)
                 self._rl_feedback_deadline = 0
+                feedback_text = None
+                if uses_text_feedback and label != "no_rl":
+                    feedback_text = self._prompt_for_inline_text_input(
+                        title="SDPO Text Reward",
+                        question=(
+                            "Describe what the model should learn from this turn. "
+                            "One short sentence is enough."
+                        ),
+                        placeholder="describe the correction or behavior to reinforce",
+                        timeout=max(15, int(cfg.get("sdpo_text_feedback_timeout_seconds", 90))),
+                        hint_text="  type a short note · Enter save · Ctrl+C default feedback",
+                        allow_empty=True,
+                        cancel_value="",
+                    ).strip() or None
                 return self._submit_online_rl_feedback(
                     session_id=target["session_id"],
                     message_id=target["message_id"],
                     label=label,
+                    feedback_text=feedback_text,
                 )
             except queue.Empty:
                 remaining = self._rl_feedback_deadline - time.monotonic()
@@ -6349,7 +6463,8 @@ class HermesCLI:
             # --- Clarify freetext mode: user typed their own answer ---
             if self._clarify_freetext and self._clarify_state:
                 text = event.app.current_buffer.text.strip()
-                if text:
+                allow_empty = bool(self._clarify_state.get("allow_empty"))
+                if text or allow_empty:
                     self._clarify_state["response_queue"].put(text)
                     self._clarify_state = None
                     self._clarify_freetext = False
@@ -6602,9 +6717,11 @@ class HermesCLI:
 
             # Cancel clarify prompt
             if self._clarify_state:
-                self._clarify_state["response_queue"].put(
-                    "The user cancelled. Use your best judgement to proceed."
+                cancel_value = self._clarify_state.get(
+                    "cancel_value",
+                    "The user cancelled. Use your best judgement to proceed.",
                 )
+                self._clarify_state["response_queue"].put(cancel_value)
                 self._clarify_state = None
                 self._clarify_freetext = False
                 event.app.current_buffer.reset()
@@ -6896,7 +7013,10 @@ class HermesCLI:
             if cli_ref._approval_state:
                 return ""
             if cli_ref._clarify_freetext:
-                return "type your answer here and press Enter"
+                return (
+                    (cli_ref._clarify_state or {}).get("placeholder")
+                    or "type your answer here and press Enter"
+                )
             if cli_ref._clarify_state:
                 return ""
             if cli_ref._command_running:
@@ -6934,7 +7054,10 @@ class HermesCLI:
             if cli_ref._rl_feedback_state:
                 remaining = max(0, int(cli_ref._rl_feedback_deadline - _time.monotonic()))
                 return [
-                    ('class:hint', '  \u2191/\u2193 select \u00b7 Enter confirm \u00b7 1/2/3 quick-select \u00b7 Ctrl+C skip'),
+                    (
+                        'class:hint',
+                        f"  {(cli_ref._rl_feedback_state.get('hint_line') or '↑/↓ select · Enter confirm · 1/2/3 quick-select')} · Ctrl+C skip",
+                    ),
                     ('class:clarify-countdown', f'  ({remaining}s)'),
                 ]
 
@@ -6950,7 +7073,10 @@ class HermesCLI:
                 countdown = f'  ({remaining}s)' if cli_ref._clarify_deadline else ''
                 if cli_ref._clarify_freetext:
                     return [
-                        ('class:hint', '  type your answer and press Enter'),
+                        (
+                            'class:hint',
+                            f"  {(cli_ref._clarify_state.get('hint_text') or 'type your answer and press Enter')}",
+                        ),
                         ('class:clarify-countdown', countdown),
                     ]
                 return [
@@ -7029,6 +7155,7 @@ class HermesCLI:
             question = state["question"]
             choices = state.get("choices") or []
             selected = state.get("selected", 0)
+            title = state.get("title") or "Hermes needs your input"
             preview_lines = _wrap_panel_text(question, 60)
             for i, choice in enumerate(choices):
                 prefix = "❯ " if i == selected and not cli_ref._clarify_freetext else "  "
@@ -7039,14 +7166,14 @@ class HermesCLI:
                 else "  Other (type your answer)"
             )
             preview_lines.extend(_wrap_panel_text(other_label, 60, subsequent_indent="  "))
-            box_width = _panel_box_width("Hermes needs your input", preview_lines)
+            box_width = _panel_box_width(title, preview_lines)
             inner_text_width = max(8, box_width - 2)
 
             lines = []
             # Box top border
             lines.append(('class:clarify-border', '╭─ '))
-            lines.append(('class:clarify-title', 'Hermes needs your input'))
-            lines.append(('class:clarify-border', ' ' + ('─' * max(0, box_width - len("Hermes needs your input") - 3)) + '╮\n'))
+            lines.append(('class:clarify-title', title))
+            lines.append(('class:clarify-border', ' ' + ('─' * max(0, box_width - len(title) - 3)) + '╮\n'))
             _append_blank_panel_line(lines, 'class:clarify-border', box_width)
 
             # Question text
@@ -7101,7 +7228,7 @@ class HermesCLI:
             if not state:
                 return []
 
-            title = "Online RL"
+            title = state.get("panel_title") or "Online RL"
             choices = state.get("choices") or []
             selected = state.get("selected", 0)
 
@@ -7111,22 +7238,24 @@ class HermesCLI:
 
             # Choice icons and descriptions
             _choice_meta = {
-                "upweight": {"icon": "\u2b06", "hint": "learn from this", "key": "1"},
-                "downweight": {"icon": "\u2b07", "hint": "unlearn this", "key": "2"},
-                "no_rl": {"icon": "\u2298", "hint": "no training", "key": "3"},
+                "upweight": {"icon": "\u2b06", "key": "1"},
+                "downweight": {"icon": "\u2b07", "key": "2"},
+                "no_rl": {"icon": "\u2298", "key": "3"},
             }
+            subtitle = state.get("panel_subtitle") or ""
+            hint_line = state.get("hint_line") or "\u25b2/\u25bc navigate  Enter confirm  1/2/3 quick-select"
 
             # Build choice lines for width calculation
             choice_texts = []
             for i, choice in enumerate(choices):
                 label_key = choice.get("label", "")
-                meta = _choice_meta.get(label_key, {"icon": " ", "hint": "", "key": str(i + 1)})
+                meta = _choice_meta.get(label_key, {"icon": " ", "key": str(i + 1)})
                 prefix = "\u276f " if i == selected else "  "
                 choice_title = choice.get("title", label_key)
-                choice_texts.append(f"{prefix}{meta['icon']} {choice_title}   {meta['hint']}  [{meta['key']}]")
+                choice_hint = choice.get("short_hint") or ""
+                choice_texts.append(f"{prefix}{meta['icon']} {choice_title}   {choice_hint}  [{meta['key']}]")
 
-            hint_line = "\u25b2/\u25bc navigate  Enter confirm  1/2/3 quick-select"
-            all_lines = [hint_line] + choice_texts
+            all_lines = ([subtitle] if subtitle else []) + [hint_line] + choice_texts
             box_width = _panel_box_width(title, all_lines, min_width=38, max_width=60)
             inner_text_width = max(8, box_width - 2)
 
@@ -7143,6 +7272,11 @@ class HermesCLI:
 
             _append_blank_panel_line(lines, 'class:rl-feedback-border', box_width)
 
+            if subtitle:
+                for wrapped in _wrap_panel_text(subtitle, inner_text_width):
+                    _append_panel_line(lines, 'class:rl-feedback-border', 'class:rl-feedback-hint', wrapped, box_width)
+                _append_blank_panel_line(lines, 'class:rl-feedback-border', box_width)
+
             # Hotkey hints
             for wrapped in _wrap_panel_text(hint_line, inner_text_width):
                 _append_panel_line(lines, 'class:rl-feedback-border', 'class:rl-feedback-hint', wrapped, box_width)
@@ -7152,11 +7286,12 @@ class HermesCLI:
             # Choices with icons and descriptions
             for i, choice in enumerate(choices):
                 label_key = choice.get("label", "")
-                meta = _choice_meta.get(label_key, {"icon": " ", "hint": "", "key": str(i + 1)})
+                meta = _choice_meta.get(label_key, {"icon": " ", "key": str(i + 1)})
                 is_selected = i == selected
                 prefix = "\u276f " if is_selected else "  "
                 choice_title = choice.get("title", label_key)
-                display_text = f"{prefix}{meta['icon']} {choice_title}   {meta['hint']}  [{meta['key']}]"
+                choice_hint = choice.get("short_hint") or ""
+                display_text = f"{prefix}{meta['icon']} {choice_title}   {choice_hint}  [{meta['key']}]"
                 style = 'class:rl-feedback-selected' if is_selected else 'class:rl-feedback-choice'
                 for wrapped in _wrap_panel_text(display_text, inner_text_width, subsequent_indent="    "):
                     _append_panel_line(lines, 'class:rl-feedback-border', style, wrapped, box_width)
